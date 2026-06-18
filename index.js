@@ -12,7 +12,6 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANO
 function today() {
   return new Date().toLocaleString("en-CA", { timeZone: "America/New_York" }).split(",")[0];
 }
-}
 
 function formatMeal(meal) {
   return (
