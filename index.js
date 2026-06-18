@@ -10,7 +10,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
 function today() {
-  return new Date().toISOString().split("T")[0];
+  return new Date().toLocaleString("en-CA", { timeZone: "America/New_York" }).split(",")[0];
+}
 }
 
 function formatMeal(meal) {
