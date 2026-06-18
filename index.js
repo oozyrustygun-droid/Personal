@@ -358,4 +358,15 @@ bot.on("message", async (msg) => {
 });
 
 http.createServer((req, res) => res.end("OK")).listen(process.env.PORT || 3000);
+// Self-ping to prevent Render free tier spin-down
+const RENDER_URL = process.env.RENDER_URL;
+if (RENDER_URL) {
+  setInterval(() => {
+    http.get(RENDER_URL, (res) => {
+      console.log("Self-ping:", res.statusCode);
+    }).on("error", (err) => {
+      console.log("Ping error:", err.message);
+    });
+  }, 14 * 60 * 1000); // every 14 minutes
+}
 console.log("Calorie Tracker Bot is running with Claude AI...");
