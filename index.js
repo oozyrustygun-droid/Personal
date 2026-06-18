@@ -154,7 +154,7 @@ async function saveMeal(chatId, nutrition) {
     .from("meals")
     .insert([{
       chat_id: chatId.toString(),
-      food_name: nutrition.food_name,
+      calories: nutrition.calories,
       calories: nutrition.calories,
       protein: nutrition.protein,
       carbs: nutrition.carbs,
