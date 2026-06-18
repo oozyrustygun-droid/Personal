@@ -1,0 +1,15 @@
+{
+  "name": "calorie-tracker-bot",
+  "version": "1.0.0",
+  "description": "Telegram calorie tracker bot with Claude Vision + Supabase",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.3",
+    "@supabase/supabase-js": "^2.44.4",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
