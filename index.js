@@ -59,7 +59,7 @@ function fetchImageAsBase64(url) {
   });
 }
 
-const NUTRITION_PROMPT = `You are a nutrition expert. Respond ONLY with a valid JSON object, no markdown, no explanation:
+const NUTRITION_PROMPT = `You are a nutrition expert. You must respond with ONLY a raw JSON object. No markdown. No backticks. No explanation. No text before or after. Start your response with { and end with }. Use this exact format:
 {
   "food_name": "descriptive name of the food",
   "calories": 0,
@@ -100,8 +100,9 @@ async function analyzeFoodImage(imageUrl) {
     ],
   });
 
-  const text = response.content[0].text.trim();
-  return JSON.parse(text);
+const text = response.content[0].text.trim();
+const json = text.match(/\{[\s\S]*\}/)?.[0];
+return JSON.parse(json);
 }
 
 // ── Analyze food from text description ───────────────────────────────────────
@@ -117,8 +118,9 @@ async function analyzeFoodText(description) {
     ],
   });
 
-  const text = response.content[0].text.trim();
-  return JSON.parse(text);
+const text = response.content[0].text.trim();
+const json = text.match(/\{[\s\S]*\}/)?.[0];
+return JSON.parse(json);
 }
 
 // ── AI summary of food diary ──────────────────────────────────────────────────
