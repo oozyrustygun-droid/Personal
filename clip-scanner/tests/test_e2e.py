@@ -10,7 +10,6 @@ few cents); live mode only asserts that a valid report comes out.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -22,6 +21,8 @@ from clip_scanner.boundaries import straddles
 from clip_scanner.cli import main
 from clip_scanner.transcribe import Transcript
 
+from conftest import pick_asr
+
 pytestmark = pytest.mark.e2e
 FIX = Path(__file__).parent / "fixtures" / "sample.mp4"
 LIVE = os.environ.get("CLIP_SCANNER_LIVE") == "1" and bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -29,23 +30,6 @@ LIVE = os.environ.get("CLIP_SCANNER_LIVE") == "1" and bool(os.environ.get("ANTHR
 # "so anyway chat" wind-up fails the hook gate, as the real panel is instructed to do.
 GREAT_RULES = {"great_phrases": ["oh my god", "never eating", "worst thing"], "great_score": 9.2,
                "default_score": 6.2, "hook_fail_openers": ["so anyway"]}
-
-
-def pick_asr() -> tuple[str, str]:
-    choice = os.environ.get("CLIP_SCANNER_TEST_ASR")
-    if choice:
-        return choice, os.environ.get("CLIP_SCANNER_TEST_ASR_MODEL", "tiny.en")
-    if importlib.util.find_spec("faster_whisper"):
-        try:
-            from faster_whisper import WhisperModel
-
-            WhisperModel("tiny.en", device="cpu", compute_type="int8")
-            return "faster-whisper", "tiny.en"
-        except Exception:
-            pass
-    if importlib.util.find_spec("pocketsphinx"):
-        return "pocketsphinx", "en-us"
-    pytest.skip("no usable ASR backend (Whisper weights unavailable and pocketsphinx not installed)")
 
 
 @pytest.fixture(scope="module")

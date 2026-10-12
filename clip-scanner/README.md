@@ -37,6 +37,25 @@ Linux also needs `apt install ffmpeg libegl1 libgles2` (MediaPipe's native libra
 Optional speaker diarization: `uv sync --extra diarize` plus a Hugging Face token in `HF_TOKEN` that
 has the pyannote models accepted. Set `[diarization] enabled = true`.
 
+## Web UI (easiest)
+
+```bash
+uv run clip-scanner ui
+```
+
+This opens `http://127.0.0.1:8765` in your browser. Paste or drop one or more YouTube/TikTok links (or the
+full path of a local video) and press **Scan**. Each scan shows its stages live (Ingest → Transcribe → Signals
+→ Candidates → Keyframes → Judging → Export). If the cost estimate is above your limit
+(`confirm_above_usd`), the scan pauses for you to click **Approve & judge** or **Cancel**. When it finishes
+you get the verdict, playable vertical clips, one-click copy for the caption, posting hook and hashtags,
+download buttons (vertical and raw cut), and a link that opens the source video at the clip's timestamp.
+With no GREAT clips you get the near-misses and exactly what killed each one. **Past reports** lists every
+earlier scan.
+
+Scans run one at a time on your Mac with the same pipeline as the command line. Press Ctrl-C in the
+terminal to stop. The UI is only reachable from your own machine (127.0.0.1), and other websites
+can't start scans, because every request needs a per-launch token.
+
 ## Usage
 
 ```bash

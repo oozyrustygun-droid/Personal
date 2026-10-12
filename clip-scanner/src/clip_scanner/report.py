@@ -93,6 +93,7 @@ def _clip_json(rank, d, c, pkg, exported) -> dict:
         "gates": d.deterministic,
         "file": (exported.get(c.id) or {}).get("vertical"),
         "raw_file": (exported.get(c.id) or {}).get("raw"),
+        "poster": (exported.get(c.id) or {}).get("poster"),
         "raw_clip_in_out": [(exported.get(c.id) or {}).get("raw_in"), (exported.get(c.id) or {}).get("raw_out")],
     }
 

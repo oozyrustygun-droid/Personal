@@ -14,7 +14,7 @@ from .keyframes import extract_keyframes
 from .llm import LLM
 from .signals import Signals, signals_stage
 from .transcribe import Transcript, transcribe
-from .ui import console, fmt_usd, stage
+from .ui import console, emit, fmt_usd, stage
 
 
 @dataclass
@@ -96,9 +96,17 @@ def print_estimate(est: dict) -> None:
 
 
 def run_scan_cli(args: argparse.Namespace) -> int:
+    from .judging.runner import confirm_cost
+
+    return run_scan(args, lambda est, cfg: confirm_cost(est, cfg, args.yes, console))["code"]
+
+
+def run_scan(args: argparse.Namespace, confirm) -> dict:
+    """One full scan. `confirm(estimate, cfg) -> bool` decides whether to spend on judging (the terminal
+    prompt in the CLI, an Approve button in the web UI). Returns {"code", "out_dir", "status"}."""
     from .export import (expected_files, export_clips, prune_stale_clips, restore_all, restore_exports,
                          stash_exports)
-    from .judging.runner import build_context, confirm_cost, run_judging
+    from .judging.runner import build_context, run_judging
     from .report import out_dir_for, print_report, write_in_progress, write_reports
 
     cfg = load_config(args.config)
@@ -121,15 +129,16 @@ def run_scan_cli(args: argparse.Namespace) -> int:
 
     def on_estimate(est: dict) -> bool:
         print_estimate(est)
+        emit("estimate", **est, threshold=cfg.judging.confirm_above_usd)
         if args.dry_run:
             return False
-        return confirm_cost(est, cfg, args.yes, console)
+        return confirm(est, cfg)
 
     with stage("Judging"):
         result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate)
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")
-        return 0
+        return {"code": 0, "out_dir": out_dir, "status": "dry_run"}
     if result.status == "unavailable":
         # Nothing was judged (cancelled at the cost prompt, or no credentials): leave the previous
         # results exactly as they were. With nothing to restore, report why judging didn't run.
@@ -139,7 +148,7 @@ def run_scan_cli(args: argparse.Namespace) -> int:
             write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, scripted=scripted)
         for n in result.notes:
             console.print(f"[yellow]{n}[/yellow]")
-        return 3
+        return {"code": 3, "out_dir": out_dir, "status": "unavailable", "notes": result.notes}
     keep = expected_files(out_dir, a, result, cfg)
     restore_exports(out_dir, keep)
     paths = write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, scripted=scripted)
@@ -153,4 +162,4 @@ def run_scan_cli(args: argparse.Namespace) -> int:
     for p in prune_stale_clips(out_dir, keep):
         console.print(f"  [dim]removed stale export that is no longer GREAT: {p.name}[/dim]")
     print_report(a, result, cfg, paths, explain_rejects=args.explain_rejects, exported=exported)
-    return 0 if result.status != "unavailable" else 3
+    return {"code": 0, "out_dir": out_dir, "status": result.status}

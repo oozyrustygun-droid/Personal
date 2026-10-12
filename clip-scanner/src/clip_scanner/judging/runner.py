@@ -19,6 +19,7 @@ from ..cost import estimate_tokens, image_tokens
 from ..llm import LLM, LLMError
 from ..signals import Signals
 from ..transcribe import Transcript
+from ..ui import emit
 from . import prompts
 from .gates import GateResult, clip_measurements, deterministic_gates
 from .panel import Decision, JudgeOutcome, decide, judge_rejects, near_miss_key, rank_great
@@ -281,6 +282,7 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
 
     def work(c: Candidate) -> Decision:
         d = judge_candidate(c, dets[c.id], meas[c.id], ctx, full_panel=full_panel)
+        emit("candidate", id=c.id, stage=d.stage, great=d.great, reason=d.reasons[0] if d.reasons else "")
         if console:
             mark = {"great": "[bold green]GREAT[/bold green]", "error": "[yellow]error[/yellow]"}.get(
                 d.stage, "[red]rejected[/red]")
@@ -288,6 +290,7 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
         return d
 
     eligible = [c for c in order if all(g.passed for g in dets[c.id])]
+    emit("judging", total=len(cands), eligible=len(eligible))
     for c in order:
         if c not in eligible:
             decisions[c.id] = decide(c.id, dets[c.id], None, None, None, cfg)

@@ -3,6 +3,7 @@
     clip-scanner <url-or-file> [--max-clips 5] [--no-cut] [--explain-rejects]
     clip-scanner calibrate [--manifest calibration/manifest.toml] [--fetch] [--write-config]
     clip-scanner doctor
+    clip-scanner ui            # local web front end (paste/drop links, review clips)
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ def scan_parser() -> argparse.ArgumentParser:
         prog="clip-scanner",
         description="Find only the GREAT short-form clips in a long-form video. "
                     "Zero clips is a valid, expected answer.",
-        epilog="Other commands: `clip-scanner calibrate --help`, `clip-scanner doctor`.",
+        epilog="Other commands: `clip-scanner ui` (web front end), `clip-scanner calibrate --help`, "
+               "`clip-scanner doctor`.",
     )
     p.add_argument("source", help="YouTube/TikTok URL or a local video file")
     p.add_argument("--max-clips", type=_positive_int, default=None,
@@ -79,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
             from .doctor import run_doctor
 
             return run_doctor(argv[1:])
+        if argv and argv[0] == "ui":
+            from .server import run_ui
+
+            return run_ui(argv[1:])
         args = scan_parser().parse_args(argv)
         from .pipeline import run_scan_cli
 

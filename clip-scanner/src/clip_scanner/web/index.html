@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clip-scanner</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ffd23f'/%3E%3Ctext x='16' y='23' font-size='19' font-weight='900' text-anchor='middle' font-family='Arial' fill='%231a1500'%3EJ%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0f1012; --panel: #17191c; --panel-2: #1e2125; --line: #2a2e33; --text: #eceef0;
+    --muted: #9aa1a9; --accent: #ffd23f; --accent-ink: #1a1500; --good: #3ddc84; --bad: #ff5d5d;
+    --warn: #ffb02e; --info: #6ab7ff; --radius: 14px; --shadow: 0 1px 0 rgba(255,255,255,.04), 0 8px 24px rgba(0,0,0,.25);
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f5f6f7; --panel: #ffffff; --panel-2: #f0f2f4; --line: #dfe3e7; --text: #15181b;
+      --muted: #5d656e; --accent: #ffcc00; --accent-ink: #1a1500; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06); }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  a { color: var(--info); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 16px 80px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 34px; height: 34px; border-radius: 9px; background: var(--accent); color: var(--accent-ink);
+    display: grid; place-items: center; font-weight: 900; font-size: 18px; }
+  .brand h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .brand p { margin: 0; color: var(--muted); font-size: 13px; }
+  .conn { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+  .dot.off { background: var(--bad); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 18px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; }
+  /* drop zone */
+  .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 4px; transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  textarea { width: 100%; min-height: 104px; resize: vertical; border: 0; outline: 0; background: transparent;
+    color: var(--text); font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 12px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+  .row .spacer { flex: 1; }
+  label.opt { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  input[type=number] { width: 64px; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); font: inherit; }
+  button, .btn { appearance: none; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    padding: 8px 14px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; text-decoration: none;
+    display: inline-flex; align-items: center; gap: 6px; }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.danger { color: var(--bad); }
+  button.small, .btn.small { padding: 4px 10px; font-size: 13px; border-radius: 8px; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .err { color: var(--bad); font-size: 14px; }
+  /* jobs */
+  .jobs { display: grid; gap: 12px; }
+  .job { padding: 14px 16px; }
+  .job-head { display: flex; align-items: flex-start; gap: 10px; }
+  .job-title { font-weight: 700; word-break: break-word; }
+  .job-src { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .chip { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); }
+  .chip.running { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); }
+  .chip.await { color: var(--accent-ink); background: var(--accent); border-color: transparent; }
+  .chip.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+  .chip.failed, .chip.cancelled { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .steps { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin: 12px 0 6px; }
+  .step { font-size: 11px; color: var(--muted); }
+  .step .bar { height: 5px; border-radius: 3px; background: var(--panel-2); margin-bottom: 4px; overflow: hidden; }
+  .step.active .bar { background: linear-gradient(90deg, var(--info), transparent); background-size: 200% 100%;
+    animation: slide 1.1s linear infinite; }
+  .step.done .bar, .step.cached .bar { background: var(--good); }
+  .step.cached .bar { opacity: .55; }
+  .step.active { color: var(--text); font-weight: 600; }
+  @keyframes slide { from { background-position: 100% 0 } to { background-position: -100% 0 } }
+  .approve { margin-top: 12px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+  .approve b { font-size: 18px; }
+  details.log { margin-top: 10px; }
+  details.log summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre { margin: 8px 0 0; max-height: 260px; overflow: auto; background: var(--panel-2); border-radius: 8px;
+    padding: 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+  .empty { color: var(--muted); text-align: center; padding: 26px; border: 1px dashed var(--line); border-radius: var(--radius); }
+  /* history */
+  .hist { display: grid; gap: 8px; }
+  .hist-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer; }
+  .hist-item:hover { border-color: var(--muted); }
+  .hist-item .t { flex: 1; min-width: 0; }
+  .hist-item .t div:first-child { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* results */
+  .verdict { border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; border: 1px solid var(--line); }
+  .verdict h3 { margin: 0 0 4px; font-size: 22px; letter-spacing: -.01em; }
+  .verdict.great { background: color-mix(in srgb, var(--good) 14%, var(--panel)); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+  .verdict.none { background: color-mix(in srgb, var(--bad) 10%, var(--panel)); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .verdict.incomplete { background: color-mix(in srgb, var(--warn) 12%, var(--panel)); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+  .banner { background: var(--warn); color: #1d1300; font-weight: 800; padding: 8px 12px; border-radius: 10px; margin-bottom: 12px; }
+  .clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .clip { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .player { position: relative; background: #000; aspect-ratio: 9 / 16; width: 100%; overflow: hidden; }
+  .player video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .player .na { position: absolute; inset: 0; display: grid; place-items: center; color: #888; font-size: 13px;
+    padding: 20px; text-align: center; }
+  .clip-body { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  .score { background: var(--accent); color: var(--accent-ink); font-weight: 800; padding: 2px 8px; border-radius: 6px; }
+  .caption { font-size: 20px; font-weight: 800; line-height: 1.25; letter-spacing: -.01em; }
+  .field { display: grid; gap: 3px; }
+  .field .k { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .copyline { display: flex; gap: 8px; align-items: flex-start; }
+  .copyline span { flex: 1; }
+  .judges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .tablewrap { overflow-x: auto; }
+  details.more summary { cursor: pointer; color: var(--muted); }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+    padding: 8px 14px; border-radius: 10px; font-weight: 600; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  @media (max-width: 640px) {
+    .steps { grid-template-columns: repeat(4, 1fr); }
+    .brand p { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">J</div>
+      <div><h1>clip-scanner</h1><p>Joe Bartolozzi edition · only GREAT clips, zero is a valid answer</p></div>
+    </div>
+    <div class="conn"><span class="dot" id="dot"></span><span id="conn">connected</span></div>
+  </header>
+
+  <section class="panel">
+    <div class="drop" id="drop">
+      <textarea id="links" placeholder="Paste or drop YouTube / TikTok links here, one or many.&#10;https://www.youtube.com/watch?v=…&#10;(Local files: paste the full path to the video.)"></textarea>
+    </div>
+    <div class="row">
+      <label class="opt">Max clips <input type="number" id="maxclips" min="1" max="20" value="5"></label>
+      <label class="opt"><input type="checkbox" id="cut" checked> Export vertical + raw clips</label>
+      <span class="spacer"></span>
+      <span class="err" id="formerr"></span>
+      <button class="primary" id="scan">Scan</button>
+    </div>
+    <p class="hint">Scans run one at a time on this computer. You'll be asked to approve before judging spends more than your
+      configured limit. Re-scanning a video reuses everything already paid for.</p>
+  </section>
+
+  <h2>Scans</h2>
+  <div class="jobs" id="jobs"><div class="empty">Nothing scanning yet. Paste a link above.</div></div>
+
+  <div id="results-wrap" hidden>
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+
+  <h2>Past reports</h2>
+  <div class="hist" id="hist"><div class="empty">No reports yet.</div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = "__CLIP_SCANNER_TOKEN__";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const STAGES = ["Ingest", "Transcribe", "Signals", "Candidates", "Keyframes", "Judging", "Export"];
+const STATUS = { queued: ["Queued", ""], running: ["Running", "running"], awaiting_approval: ["Needs approval", "await"],
+  done: ["Done", "done"], failed: ["Failed", "failed"], cancelled: ["Cancelled", "cancelled"] };
+let lastJobs = {}, openReportDir = null, seenDone = new Set(), openLogs = new Set();
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Clip-Scanner-Token": TOKEN, ...(opts.headers || {}) } });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 1400); }
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); } catch {
+    const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  toast("Copied");
+}
+function fmtTs(s) { s = Math.max(0, Number(s) || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = Math.floor(s % 60);
+  return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`; }
+function usd(x) { return x == null ? "–" : (x >= 1 ? `$${x.toFixed(2)}` : `$${x.toFixed(3)}`); }
+function ytAt(url, t) {
+  if (!url || !/youtu\.?be/.test(url)) return null;
+  return url + (url.includes("?") ? "&" : "?") + "t=" + Math.floor(t) + "s";
+}
+
+/* ---- submit / drop ------------------------------------------------------------------------- */
+$("scan").onclick = async () => {
+  const text = $("links").value.trim();
+  $("formerr").textContent = "";
+  if (!text) { $("formerr").textContent = "Paste at least one link."; return; }
+  $("scan").disabled = true;
+  try {
+    const r = await api("/api/jobs", { method: "POST", body: JSON.stringify({ text, max_clips: $("maxclips").value, cut: $("cut").checked }) });
+    $("links").value = "";
+    toast(`Queued ${r.jobs.length} scan${r.jobs.length > 1 ? "s" : ""}`);
+    poll();
+  } catch (e) { $("formerr").textContent = e.message; }
+  finally { $("scan").disabled = false; }
+};
+const drop = $("drop");
+["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain");
+  if (t) { $("links").value = ($("links").value.trim() + "\n" + t.trim()).trim() + "\n"; }
+  else if (e.dataTransfer.files.length) { $("formerr").textContent = "Drop links, not files. For a local video, paste its full path."; }
+});
+$("links").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("scan").click(); });
+
+/* ---- jobs ---------------------------------------------------------------------------------- */
+function jobCard(j) {
+  const [label, cls] = STATUS[j.status] || [j.status, ""];
+  const cur = j.status === "running" && j.current ? ` · ${esc(j.current)}` : "";
+  const steps = STAGES.map((name) => {
+    const s = (j.stages || []).find((x) => x.name === name) || { state: "pending" };
+    const t = s.state === "cached" ? "cached" : (s.seconds != null ? `${s.seconds}s` : "");
+    return `<div class="step ${s.state}" title="${esc(s.note || "")}"><div class="bar"></div>${name}${t ? ` <span class="hint">${t}</span>` : ""}</div>`;
+  }).join("");
+  let extra = "";
+  if (j.judging && j.judging.total && (j.status === "running" || j.status === "done")) {
+    extra += `<div class="hint">Judged ${j.judging.done} of ${j.judging.eligible} candidates that passed the measured gates
+      (${j.judging.total} proposed) · <b>${j.judging.great}</b> GREAT so far</div>`;
+  }
+  if (j.status === "awaiting_approval" && j.estimate) {
+    const e = j.estimate;
+    extra += `<div class="approve"><div>Judging ${e.uncached} candidate${e.uncached === 1 ? "" : "s"} with ${esc(e.model)} (effort ${esc(e.effort)})</div>
+      <div><b>~${usd(e.expected_usd)}</b> expected <span class="hint">· worst case ${usd(e.worst_case_usd)} · your limit ${usd(e.threshold)}</span></div>
+      <div class="row"><button class="primary" data-approve="${j.id}">Approve &amp; judge</button><button class="danger" data-cancel="${j.id}">Cancel</button></div></div>`;
+  }
+  if (j.status === "done" && j.report_dir) {
+    extra += `<div class="row"><button class="primary small" data-open="${esc(j.report_dir)}">View results</button>
+      ${j.result_status === "unavailable" ? '<span class="hint">Judging did not run; previous results were kept.</span>' : ""}</div>`;
+  }
+  if (j.status === "failed") extra += `<div class="err">${esc(j.error)}</div>`;
+  const cancelQueued = j.status === "queued" ? `<button class="small danger" data-cancel="${j.id}">Remove</button>` : "";
+  const logOpen = openLogs.has(j.id) ? "open" : "";
+  return `<div class="panel job" id="job-${j.id}">
+    <div class="job-head"><div style="flex:1;min-width:0"><div class="job-title">${esc(j.title || j.source)}</div>
+      <div class="job-src">${esc(j.source)}</div></div><span class="chip ${cls}">${label}${cur}</span>${cancelQueued}</div>
+    <div class="steps">${steps}</div>${extra}
+    <details class="log" data-log="${j.id}" ${logOpen}><summary>Log</summary><pre>${esc((j.log || []).join("\n")) || "…"}</pre></details>
+  </div>`;
+}
+
+async function poll() {
+  let data;
+  try { data = await api("/api/jobs"); $("dot").classList.remove("off"); $("conn").textContent = "connected"; }
+  catch { $("dot").classList.add("off"); $("conn").textContent = "scanner not running"; return; }
+  const box = $("jobs");
+  if (!data.jobs.length) { box.innerHTML = '<div class="empty">Nothing scanning yet. Paste a link above.</div>'; lastJobs = {}; return; }
+  if (box.querySelector(".empty")) box.innerHTML = "";
+  const ids = data.jobs.map((j) => j.id);
+  for (const j of data.jobs) {
+    const key = JSON.stringify(j);
+    if (lastJobs[j.id] === key) continue;
+    lastJobs[j.id] = key;
+    const html = jobCard(j), old = $("job-" + j.id);
+    if (old) {
+      const pre = old.querySelector("pre"), atBottom = pre && pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+      old.outerHTML = html;
+      const np = $("job-" + j.id).querySelector("pre"); if (np && atBottom) np.scrollTop = np.scrollHeight;
+    } else {
+      box.insertAdjacentHTML(ids.indexOf(j.id) === 0 ? "afterbegin" : "beforeend", html);
+    }
+    if (j.status === "done" && j.report_dir && !seenDone.has(j.id)) {
+      seenDone.add(j.id); loadHistory();
+      if (!openReportDir && j.result_status !== "unavailable") openReport(j.report_dir);
+    }
+  }
+}
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-approve],[data-cancel],[data-open],[data-copy]");
+  if (!a) return;
+  if (a.dataset.copy != null) return copy(a.dataset.copy);
+  if (a.dataset.open) return openReport(a.dataset.open);
+  const id = a.dataset.approve || a.dataset.cancel;
+  try { await api(`/api/jobs/${id}/${a.dataset.approve ? "approve" : "cancel"}`, { method: "POST" }); poll(); }
+  catch (err) { toast(err.message); }
+});
+document.addEventListener("toggle", (e) => {
+  const d = e.target; if (!d.dataset || !d.dataset.log) return;
+  d.open ? openLogs.add(d.dataset.log) : openLogs.delete(d.dataset.log);
+}, true);
+
+/* ---- history ------------------------------------------------------------------------------- */
+async function loadHistory() {
+  const { reports } = await api("/api/reports");
+  const box = $("hist");
+  if (!reports.length) { box.innerHTML = '<div class="empty">No reports yet.</div>'; return; }
+  box.innerHTML = reports.map((r) => {
+    const cls = r.great ? "done" : (r.status === "complete" ? "failed" : "");
+    return `<div class="panel hist-item" data-open="${esc(r.dir)}">
+      <div class="t"><div>${esc(r.title)}</div><div class="hint">${esc(r.generated_at)}${r.scripted ? " · scripted test" : ""}</div></div>
+      <span class="chip ${cls}">${esc(r.verdict)}</span></div>`;
+  }).join("");
+}
+
+/* ---- results ------------------------------------------------------------------------------- */
+const PERSONA = { jaded_scroller: "scroller", joe_superfan: "superfan", shorts_editor: "editor" };
+const STAGE_LABEL = { deterministic_gates: "measured gate", panel: "judging panel", devils_advocate: "devil's advocate", error: "judging error" };
+
+function clipCard(c, rep) {
+  const poster = c.poster_url ? ` poster="${esc(c.poster_url)}"` : "";
+  const video = c.file_url ? `<video controls playsinline preload="metadata"${poster} src="${esc(c.file_url)}"></video>`
+    : `<div class="na">Not exported${c.raw_url ? " (raw cut available below)" : ""}.<br>Scan with "Export" on to render it.</div>`;
+  const judges = (c.judges || []).map((j) => `<span class="chip">${esc(PERSONA[j.judge] || j.judge)} ${j.effective != null ? Number(j.effective).toFixed(1) : "–"}</span>`).join("");
+  const yt = ytAt(rep.video.url, c.start);
+  const tags = (c.hashtags || []).join(" ");
+  const rawNote = c.raw_url && c.raw_clip_in_out && c.raw_clip_in_out[0] != null
+    ? `<span class="hint">clip runs ${Number(c.raw_clip_in_out[0]).toFixed(1)}s → ${Number(c.raw_clip_in_out[1]).toFixed(1)}s in the raw cut</span>` : "";
+  return `<div class="panel clip">
+    <div class="player">${video}</div>
+    <div class="clip-body">
+      <div class="meta"><span class="score">${c.score != null ? Number(c.score).toFixed(1) : "–"}</span>
+        #${c.rank} · ${esc(c.start_ts)} → ${esc(c.end_ts)} · ${Number(c.duration).toFixed(1)}s${c.jump_cuts ? ` · ${c.jump_cuts} jump cut${c.jump_cuts > 1 ? "s" : ""}` : ""}
+        ${yt ? `· <a href="${esc(yt)}" target="_blank" rel="noopener">open at ${fmtTs(c.start)}</a>` : ""}</div>
+      <div class="copyline"><span class="caption">${esc(c.caption_title)}</span>
+        <button class="small" data-copy="${esc(c.caption_title)}">Copy</button></div>
+      <div class="field"><span class="k">Hook</span><span>${esc(c.hook_line)}</span></div>
+      <div class="field"><span class="k">Why it'll go viral</span><span>${esc(c.why_viral)}</span></div>
+      <div class="field"><span class="k">Posting hook text</span><div class="copyline"><span>${esc(c.posting_hook_text)}</span>
+        <button class="small" data-copy="${esc(c.posting_hook_text)}">Copy</button></div></div>
+      ${tags ? `<div class="field"><span class="k">Hashtags</span><div class="copyline"><span>${esc(tags)}</span>
+        <button class="small" data-copy="${esc(tags)}">Copy</button></div></div>` : ""}
+      <div class="field"><span class="k">Panel (every judge must clear the bar)</span><div class="judges">${judges}</div></div>
+      <details class="more"><summary>Devil's advocate &amp; arbiter</summary>
+        <p>${esc(c.devils_advocate || "–")}</p>
+        <p class="hint">Arbiter: survived with confidence ${esc(c.arbiter?.survival_confidence ?? "–")}. ${esc(c.arbiter?.decisive_issue || "")}</p></details>
+      <div class="actions">
+        ${c.file_url ? `<a class="btn small" href="${esc(c.file_url)}?download=1">⬇ Vertical 1080×1920</a>` : ""}
+        ${c.raw_url ? `<a class="btn small" href="${esc(c.raw_url)}?download=1">⬇ Raw cut for editing</a>` : ""}
+      </div>${rawNote}
+    </div></div>`;
+}
+
+function rejectRows(list) {
+  return list.map((r) => `<tr><td>${esc(r.start_ts)}–${esc(r.end_ts)}</td><td>${Number(r.duration).toFixed(1)}s</td>
+    <td>${esc(STAGE_LABEL[r.killed_at] || r.killed_at)}</td><td>${esc((r.reasons || [])[0] || "")}</td></tr>`).join("");
+}
+
+async function openReport(dir) {
+  let rep;
+  try { rep = await api(`/api/reports/${encodeURIComponent(dir)}`); } catch (e) { toast(e.message); return; }
+  openReportDir = dir;
+  const great = rep.great_clips || [];
+  const vcls = rep.status === "in_progress" ? "incomplete" : great.length ? "great" : (rep.status === "complete" ? "none" : "incomplete");
+  const notes = (rep.notes || []).concat(rep.signals_notes || []).map((n) => `<div class="hint">⚠ ${esc(n)}</div>`).join("");
+  let html = "";
+  if (rep.judge_backend === "scripted") html += `<div class="banner">SCRIPTED TEST JUDGE: these verdicts are not real. Don't post from this report.</div>`;
+  html += `<div class="verdict ${vcls}"><h3>${great.length ? "✅" : "❌"} ${esc(rep.verdict)}</h3>
+    <div><b>${esc(rep.video?.title || dir)}</b>${rep.video?.url ? ` · <a href="${esc(rep.video.url)}" target="_blank" rel="noopener">source</a>` : ""}</div>
+    ${rep.diagnosis ? `<div style="margin-top:6px">${esc(rep.diagnosis)}</div>` : ""}${notes}
+    ${rep.bar ? `<div class="hint" style="margin-top:6px">Bar: all ${rep.bar.judges.length} judges ≥ ${rep.bar.overall_min}, every gate passes, devil's advocate ${rep.bar.devils_advocate ? "on" : "off"} · ${esc(rep.bar.model)}</div>` : ""}
+    </div>`;
+  if (great.length) html += `<div class="clips">${great.map((c) => clipCard(c, rep)).join("")}</div>`;
+  if (!great.length && (rep.near_misses || []).length) {
+    html += `<div class="panel"><div class="field"><span class="k">Top near-misses and exactly what killed them</span></div>
+      <div class="tablewrap"><table><thead><tr><th>Window</th><th>Length</th><th>Killed at</th><th>Reason</th></tr></thead>
+      <tbody>${rejectRows(rep.near_misses)}</tbody></table></div></div>`;
+  }
+  if ((rep.rejected || []).length) {
+    html += `<details class="more panel" style="margin-top:12px"><summary>All ${rep.rejected.length} rejected candidates</summary>
+      <div class="tablewrap"><table><thead><tr><th>Window</th><th>Length</th><th>Killed at</th><th>Reason</th></tr></thead>
+      <tbody>${rejectRows(rep.rejected)}</tbody></table></div></details>`;
+  }
+  if (rep.cost) html += `<p class="hint">API cost of the last run: <b>${usd(rep.cost.total_usd)}</b> (cached calls are free)${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}</p>`;
+  $("results").innerHTML = html;
+  $("results-wrap").hidden = false;
+  $("results-wrap").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+poll(); loadHistory();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>

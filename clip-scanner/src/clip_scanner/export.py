@@ -12,7 +12,7 @@ from .cache import fingerprint, read_json, write_json
 from .captions import TimedWord, build_ass
 from .config import Config
 from .facetrack import shared_crop_path
-from .media import hwaccel_args, probe, require_binary
+from .media import MediaError, extract_frame, hwaccel_args, probe, require_binary
 from .ui import console
 
 
@@ -104,6 +104,14 @@ def slug(text: str, n: int = 40) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:n] or "clip"
 
 
+def make_poster(video: Path, poster: Path, t: float) -> None:
+    """Preview frame shown on the clip card before it plays (UI only)."""
+    try:
+        extract_frame(video, t, poster, 540)
+    except MediaError:
+        pass
+
+
 def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict, raw: bool = False) -> Path:
     title = packaging.get(cand_id, {}).get("caption_title", "") or cand_id
     return out_dir / "clips" / f"{rank:02d}-{slug(title)}-{cand_id}{'-raw' if raw else ''}.mp4"
@@ -165,7 +173,11 @@ def prune_stale_clips(out_dir: Path, keep: dict[str, str]) -> list[Path]:
         if str(p) not in keep or _sidecar_fp(p) != keep[str(p)]:
             p.unlink(missing_ok=True)
             p.with_suffix(".json").unlink(missing_ok=True)
+            p.with_suffix(".jpg").unlink(missing_ok=True)
             removed.append(p)
+    for jpg in (out_dir / "clips").glob("*.jpg"):  # posters whose clip is gone
+        if not jpg.with_suffix(".mp4").exists():
+            jpg.unlink(missing_ok=True)
     return removed
 
 
@@ -187,7 +199,7 @@ def stash_exports(out_dir: Path) -> None:
     (stash / "clips").mkdir(parents=True, exist_ok=True)
     clips = out_dir / "clips"
     if clips.exists():
-        for p in list(clips.glob("*.mp4")) + list(clips.glob("*.json")):
+        for p in list(clips.glob("*.mp4")) + list(clips.glob("*.json")) + list(clips.glob("*.jpg")):
             p.replace(stash / "clips" / p.name)
     if (out_dir / "report.json").exists() and not _is_in_progress(out_dir / "report.json"):
         for name in REPORTS:  # keep the last COMPLETED report; never stash an in-progress marker over it
@@ -205,6 +217,8 @@ def restore_exports(out_dir: Path, keep: dict[str, str]) -> None:
         target = out_dir / "clips" / p.name
         if str(target) in keep and _sidecar_fp(p) == keep[str(target)]:
             p.with_suffix(".json").replace(target.with_suffix(".json"))
+            if p.with_suffix(".jpg").exists():
+                p.with_suffix(".jpg").replace(target.with_suffix(".jpg"))
             p.replace(target)
     shutil.rmtree(stash, ignore_errors=True)
 
@@ -250,6 +264,10 @@ def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> 
         try:
             _render_cached(path, render_fingerprint(a, c, cfg), lambda: render_clip(a, c, path, cfg), meta, force)
             info["vertical"] = str(path)
+            poster = path.with_suffix(".jpg")
+            if not poster.exists() or poster.stat().st_mtime < path.stat().st_mtime:
+                make_poster(path, poster, min(1.0, c.duration / 2))
+            info["poster"] = str(poster) if poster.exists() else None
         except Exception as e:  # one failed render shouldn't lose the report
             console.print(f"  [red]vertical export failed for {c.id}: {e}[/red]")
         if cfg.export.raw_copy:
