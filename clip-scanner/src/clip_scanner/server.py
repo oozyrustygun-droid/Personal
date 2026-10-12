@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
 import secrets
+import sys
 import threading
 import time
 import traceback
@@ -49,7 +51,7 @@ class Job:
         self.current = ""
         self.log: deque[str] = deque(maxlen=500)
         self.estimate: dict | None = None
-        self.judging = {"total": 0, "eligible": 0, "done": 0, "great": 0}
+        self.judging = {"total": 0, "eligible": 0, "done": 0, "errors": 0, "great": 0}
         self.out_dir: str | None = None
         self.result_status = ""
         self.notes: list[str] = []
@@ -84,7 +86,10 @@ class Job:
         elif kind == "judging":
             self.judging.update(total=data["total"], eligible=data["eligible"])
         elif kind == "candidate":
-            self.judging["done"] += 1
+            if data.get("stage") == "error":  # not judged (login, plan limit, a failed call)
+                self.judging["errors"] += 1
+            else:
+                self.judging["done"] += 1
             self.judging["great"] += int(bool(data.get("great")))
 
 
@@ -459,5 +464,12 @@ def run_ui(argv: list[str]) -> int:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
+        # The scan runs on a background thread whose worker pool would otherwise keep judging on the way
+        # out. Everything finished is already cached on disk, so stop the model calls and exit now.
+        from .claude_code import stop_all_runs
+
+        stop_all_runs()
         console.print("\nStopped. Finished scans are cached; re-add a link to resume an interrupted one.")
+        sys.stdout.flush()
+        os._exit(130)
     return 0

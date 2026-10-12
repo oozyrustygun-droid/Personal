@@ -92,7 +92,7 @@ cache_ttl = "5m"               # 5m | 1h  (api backend: prompt-cache TTL for the
 path = ""                      # blank: find `claude` on PATH
 timeout_s = 900                # per request
 allow_extra_usage = false      # stop judging the moment Claude Code starts using paid extra usage
-allow_api_billing = false      # refuse to run if Claude Code is logged in with an API key / cloud account
+                               # (an API-key or cloud login is always refused: use backend = "api" to pay per token)
 
 [judging.criterion_floors]     # every judge must also clear these per-criterion minimums (set 0 to drop one)
 hook_strength = 8.0

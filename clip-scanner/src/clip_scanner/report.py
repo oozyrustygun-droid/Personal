@@ -206,8 +206,12 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
 def cost_line(cost: dict, markdown: bool = False) -> str:
     b = (lambda t: f"**{t}**") if markdown else (lambda t: f"[bold]{t}[/bold]")
     if cost.get("billing") == "subscription":
-        return (f"Ran on your Claude plan through Claude Code: {b('$0 in API charges')} (counts toward your plan's "
+        line = (f"Ran on your Claude plan through Claude Code: {b('$0 in API charges')} (counts toward your plan's "
                 f"usage limits; the same tokens at API prices would be {fmt_usd(cost.get('api_equivalent_usd', 0))}).")
+        if cost.get("extra_usage_used"):
+            line += (" " + b("Note: Claude Code reported paid extra usage during this run") + " (check your Claude "
+                     "usage settings).")
+        return line
     if cost.get("billing") == "none":
         return "Scripted test judge: no model calls, nothing spent."
     return f"Actual API spend this run: {b(fmt_usd(cost['total_usd']))} (cached calls are free)."

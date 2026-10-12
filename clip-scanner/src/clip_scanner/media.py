@@ -27,8 +27,11 @@ INSTALL_HINT = ("brew install ffmpeg-full" if platform.system() == "Darwin"
                 else "install ffmpeg (with libass) using your package manager")
 
 
-def prefer_full_ffmpeg(dirs: tuple[str, ...] = FFMPEG_FULL_DIRS) -> str | None:
+def prefer_full_ffmpeg(dirs: tuple[str, ...] | None = None) -> str | None:
     """Put a keg-only Homebrew ffmpeg-full first on PATH. Returns its directory, if found."""
+    if dirs is None:
+        prefix = os.environ.get("HOMEBREW_PREFIX")
+        dirs = ((f"{prefix}/opt/ffmpeg-full/bin",) if prefix else ()) + FFMPEG_FULL_DIRS
     for d in dirs:
         exe = Path(d) / "ffmpeg"
         if exe.is_file() and os.access(exe, os.X_OK):

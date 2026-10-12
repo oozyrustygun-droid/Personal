@@ -39,9 +39,10 @@ FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "clau
 
 
 class LLMError(RuntimeError):
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, cached: bool = False):
         super().__init__(f"{kind}: {message}")
         self.kind = kind
+        self.cached = cached  # replayed from the on-disk response cache (a deterministic failure)
 
 
 @dataclass
@@ -170,7 +171,7 @@ class LLM:
             usages = [Usage.from_json(u) for u in hit.get("usages", [])]
             self.tracker.record(purpose, usages, cached=True)
             if "error" in hit:
-                raise LLMError(hit["error"]["kind"], hit["error"]["message"] + " (cached)")
+                raise LLMError(hit["error"]["kind"], hit["error"]["message"] + " (cached)", cached=True)
             served = hit.get("served_model", model)
             return LLMResult(data=self._validate(output, hit["data"]), usages=usages, cached=True,
                              served_model=served, request_hash=rh,
@@ -263,18 +264,21 @@ class LLM:
         except (AttributeError, TypeError, KeyError, ValueError) as e:  # malformed response: fail closed
             raise LLMError("malformed_response", f"{type(e).__name__}: {str(e)[:200]}") from e
 
+    @property
+    def plan_stop_file(self) -> Path:
+        return self.cfg.cache_dir / "claude-plan-stop.json"
+
     def _claude_exe(self) -> str:
         """Locate `claude` and confirm it is logged in to a subscription (once per run)."""
         from . import claude_code as cc
 
         with self._lock:
             if self._cc_exe is None:
-                ccfg = self.cfg.judging.claude_code
-                exe = cc.find_claude(ccfg.path)
+                exe = cc.find_claude(self.cfg.judging.claude_code.path)
                 if exe is None:
                     raise cc.ClaudeCodeError("not_installed", f"Claude Code (`claude`) not found. {cc.INSTALL_HINT}",
                                              fatal=True)
-                cc.check_subscription(exe, ccfg.allow_api_billing)
+                cc.check_subscription(exe)
                 self._cc_exe = exe
             return self._cc_exe
 
@@ -284,22 +288,28 @@ class LLM:
 
         ccfg = self.cfg.judging.claude_code
         try:
+            stop = cc.plan_stop(self.plan_stop_file)
+            if stop is not None:
+                raise stop
             run = cc.run_structured(self._claude_exe(), model=model, system=system, messages=messages, schema=schema,
                                     effort=effort, max_tokens=max_tokens, timeout=ccfg.timeout_s,
-                                    allow_api_billing=ccfg.allow_api_billing)
+                                    allow_extra_usage=ccfg.allow_extra_usage, state_file=self.plan_stop_file)
         except cc.ClaudeCodeError as e:
+            if e.rate_limit.get("isUsingOverage"):
+                self.tracker.extra_usage_used = True
             err = LLMError(e.kind, str(e))
+            if e.kind in cc.PLAN_KINDS:
+                # Shared by every scan in this process (and remembered on disk until the reset), so the
+                # next queued video or calibration clip doesn't spend one more paid call to find out.
+                cc.set_plan_stop(e.kind, str(e), cc.stop_until(e.rate_limit), self.plan_stop_file)
+            elif e.kind == "api_billing":
+                cc.set_plan_stop(e.kind, str(e), None, persist=False)
             if e.fatal:
                 self._set_fatal(err)
             raise err from e
-        rl = run.rate_limit
-        if rl.get("isUsingOverage") and not ccfg.allow_extra_usage:
-            # This answer is already paid for and kept; nothing after it runs.
-            self._set_fatal(LLMError("extra_usage", "your Claude plan's included usage ran out and Claude Code "
-                                     "started using paid extra usage, so judging stopped (judging.claude_code."
-                                     "allow_extra_usage = false). Finished judgments are cached; re-run after "
-                                     "your limit resets."))
-        elif rl.get("status") == "allowed_warning":
+        if run.overage_seen:  # only reachable with allow_extra_usage = true
+            self.tracker.extra_usage_used = True
+        if run.rate_limit.get("status") == "allowed_warning":
             self._warn_once("limit", "Heads up: Claude Code reports you are close to your plan's usage limit.")
         return run.data, run.usages, run.served_model, run.answer_models
 

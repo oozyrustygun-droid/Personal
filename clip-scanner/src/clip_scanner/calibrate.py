@@ -156,12 +156,21 @@ def loosened(rec: dict, cfg: Config) -> list[str]:
     return out
 
 
-def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: bool, allow_loosen: bool) -> str | None:
-    """Reason to refuse --write-config, or None if writing is safe."""
+def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: bool, allow_loosen: bool,
+                unjudged: int = 0, stopped: str = "") -> str | None:
+    """Reason to refuse --write-config, or None if writing is safe.
+
+    unjudged: labelled clips that ended in an error. An unjudged flop never passes under any threshold,
+    so it would silently stop constraining the sweep; a bar is only written from a complete run."""
     if rec is None:
         return "no safe recommendation to write"
     if scripted:
         return "verdicts came from the scripted test judge, not Claude"
+    if stopped:
+        return f"judging stopped early ({stopped}); re-run calibrate to finish (finished verdicts are cached)"
+    if unjudged:
+        return (f"{unjudged} labelled clip(s) were not fully judged (errors); re-run calibrate to finish "
+                "(finished verdicts are cached)")
     if hits < MIN_PER_LABEL_TO_WRITE or flops < MIN_PER_LABEL_TO_WRITE:
         return (f"need at least {MIN_PER_LABEL_TO_WRITE} hits AND {MIN_PER_LABEL_TO_WRITE} flops that the panel "
                 f"actually scored (have {hits} hits, {flops} flops; clips killed by a hard gate or an error "
@@ -247,7 +256,13 @@ def run_calibrate(args: argparse.Namespace) -> int:
     table = []
     total_cost = 0.0
     with stage("Judging calibration clips"):
+        stop = None
         for e, a in analyses:
+            # One stop (login, plan limit, extra usage) covers every clip: later clips still resolve
+            # from the cache but start no new requests.
+            stop = stop or next((x.llm.fatal for _, x in analyses if x.llm.fatal is not None), None)
+            if stop is not None and a.llm.fatal is None:
+                a.llm.fatal = stop
             ctx = build_context(cfg, a.llm, a.transcript, a.signals, a.frames, a.meta.title, a.meta.uploader,
                                 a.meta.duration)
             c = a.candidates[0]
@@ -295,8 +310,13 @@ def run_calibrate(args: argparse.Namespace) -> int:
         console.print(f"[red]{sw['note']}[/red]")
 
     out_dir = manifest.parent / "results" / time.strftime("%Y%m%d-%H%M%S")
-    for msg in sorted({str(a.llm.fatal).split(": ", 1)[-1] for _, a in analyses if a.llm.fatal is not None}):
+    stopped = sorted({str(a.llm.fatal).split(": ", 1)[-1] for _, a in analyses if a.llm.fatal is not None})
+    for msg in stopped:
         console.print(f"[yellow]Judging stopped early: {msg}[/yellow]")
+    unjudged = sum(1 for _, d in labeled if d.stage == "error")
+    if unjudged:
+        console.print(f"[yellow]{unjudged} labelled clip(s) could not be judged; the precision figures above treat "
+                      f"them as rejected. Re-run to finish.[/yellow]")
     write_json(out_dir / "calibration.json", {"judge_backend": backend, "informative": informative,
                                               "current": current, "recommended": rec, "note": sw["note"],
                                               "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})
@@ -308,7 +328,7 @@ def run_calibrate(args: argparse.Namespace) -> int:
             console.print(f"[yellow]Note: this would LOOSEN the bar: {'; '.join(loose)}[/yellow]")
     if args.write_config:
         refusal = write_guard(rec, cfg, informative["hit"], informative["flop"], backend == "scripted",
-                              args.allow_loosen)
+                              args.allow_loosen, unjudged=unjudged, stopped="; ".join(stopped))
         if refusal:
             console.print(f"[red]Not writing config.toml: {refusal}.[/red]")
             return 1

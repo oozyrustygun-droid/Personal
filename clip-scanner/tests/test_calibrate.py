@@ -82,3 +82,6 @@ def test_write_guard_refuses_small_sets_loosening_and_scripted():
     assert write_guard(looser, CFG, hits=12, flops=12, scripted=False, allow_loosen=True) is None
     assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False) is None
     assert write_guard(None, CFG, hits=12, flops=12, scripted=False, allow_loosen=True)
+    # A run cut short (plan limit, errors) never writes: unjudged flops would stop constraining the bar.
+    assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False, unjudged=1)
+    assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False, stopped="usage limit")

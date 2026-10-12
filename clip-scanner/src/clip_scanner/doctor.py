@@ -34,11 +34,16 @@ def _check_claude_code(cfg) -> bool:
         return False
     _ok(True, "Claude Code version", cc.version(exe) or "unknown")
     try:
-        st = cc.check_subscription(exe, cfg.judging.claude_code.allow_api_billing if cfg else False)
+        st = cc.check_subscription(exe)
     except cc.ClaudeCodeError as e:
         return _ok(False, "Claude Code logged in to your Claude subscription", str(e))
-    return _ok(True, "Claude Code logged in to your Claude subscription",
-               f"{st.get('authMethod')}; judging uses your plan's usage, not API credits")
+    ok = _ok(True, "Claude Code logged in to your Claude subscription",
+             f"{st.get('authMethod')}; judging uses your plan's usage, not API credits")
+    if cfg is not None:
+        stop = cc.plan_stop(cfg.cache_dir / "claude-plan-stop.json")
+        if stop is not None:
+            console.print(f"  [yellow]! judging is paused: {stop}[/yellow]")
+    return ok
 
 
 def run_doctor(argv: list[str]) -> int:

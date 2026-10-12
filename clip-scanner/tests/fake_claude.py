@@ -1,8 +1,10 @@
 """A stand-in for the Claude Code CLI, driven by environment variables (see tests/test_claude_code.py).
 
 FAKE_CLAUDE_AUTH   claude.ai | oauth_token | api_key | none        (`claude auth status`)
-FAKE_CLAUDE_MODE   ok | init_api_key | usage_limit | overage | fallback | auth_fail | hang | no_structured |
-                   schema_retries | warning
+FAKE_CLAUDE_PROVIDER  apiProvider reported by `claude auth status` (default firstParty)
+FAKE_CLAUDE_MODE   ok | init_api_key | usage_limit | overage | overage_error | fallback | auth_fail | hang |
+                   slow | no_structured | schema_retries | warning
+                   (a request whose text contains "FAKE_MODE:<mode>" uses that mode instead)
 FAKE_CLAUDE_RESPONSES  JSON file: {schema property name: structured output}; the first property name
                    found in the request's --json-schema picks the answer
 FAKE_CLAUDE_LOG    JSONL file: one record per `-p` run (argv, env flags, system prompt, stdin message)
@@ -30,7 +32,8 @@ def main():
         if auth == "none":
             print(json.dumps({"loggedIn": False, "authMethod": "none"}))
             return 1
-        print(json.dumps({"loggedIn": True, "authMethod": auth, "apiProvider": "firstParty"}))
+        print(json.dumps({"loggedIn": True, "authMethod": auth,
+                          "apiProvider": os.environ.get("FAKE_CLAUDE_PROVIDER", "firstParty")}))
         return 0
     if argv == ["--version"]:
         print("9.9.9 (Claude Code)")
@@ -40,6 +43,9 @@ def main():
     model = arg(argv, "--model")
     schema = json.loads(arg(argv, "--json-schema"))
     message = json.loads(sys.stdin.readline())
+    text = " ".join(b.get("text", "") for b in message["message"]["content"] if isinstance(b, dict))
+    if "FAKE_MODE:" in text:
+        mode = text.split("FAKE_MODE:", 1)[1].split()[0]
     system = open(arg(argv, "--system-prompt-file"), encoding="utf-8").read()
     log = os.environ.get("FAKE_CLAUDE_LOG")
     if log:
@@ -47,6 +53,8 @@ def main():
             f.write(json.dumps({"argv": argv, "system": system, "message": message, "cwd": os.getcwd(),
                                 "env": {k: os.environ.get(k) for k in (
                                     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+                                    "ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_MANTLE",
+                                    "AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_OAUTH_TOKEN",
                                     "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
                                     "CLAUDE_CODE_DISABLE_AUTO_MEMORY")}}) + "\n")
     emit({"type": "system", "subtype": "init", "model": model, "tools": ["StructuredOutput"],
@@ -54,6 +62,16 @@ def main():
     if mode in ("init_api_key", "hang"):
         time.sleep(30)  # the caller must kill us
         return 0
+    if mode in ("overage", "overage_error"):
+        # The real CLI reports this from the response headers, before the answer streams.
+        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "isUsingOverage": True,
+                                                              "resetsAt": 1893456000}})
+        if mode == "overage_error":
+            emit({"type": "result", "subtype": "error_max_structured_output_retries", "is_error": True,
+                  "errors": ["validation failed"], "modelUsage": {}})
+            return 1
+    if mode == "slow":
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "20")))
     if mode == "usage_limit":
         emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1893456000}})
         emit({"type": "assistant", "parent_tool_use_id": None, "message": {

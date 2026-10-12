@@ -60,6 +60,20 @@ RESPONSES = {
 }
 
 
+LEAKY = {"ANTHROPIC_API_KEY": "sk-ant-should-not-leak", "ANTHROPIC_AUTH_TOKEN": "tok-should-not-leak",
+         "ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_PROFILE": "console-org",
+         "CLAUDE_CODE_USE_MANTLE": "1", "AWS_BEARER_TOKEN_BEDROCK": "aws-should-not-leak"}
+
+
+@pytest.fixture(autouse=True)
+def _no_plan_stop_leaks():
+    from clip_scanner import claude_code
+
+    claude_code.clear_plan_stop()
+    yield
+    claude_code.clear_plan_stop()
+
+
 @pytest.fixture()
 def fake(tmp_path, monkeypatch):
     exe = tmp_path / "bin" / "claude"
@@ -73,9 +87,13 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_RESPONSES", str(responses))
     monkeypatch.setenv("FAKE_CLAUDE_AUTH", "claude.ai")
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
-    # An API key in the user's shell must never reach Claude Code (it would bill the key).
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-leak")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-should-not-leak")
+    # Nothing in the user's shell that could route billing elsewhere may reach Claude Code.
+    for var, val in LEAKY.items():
+        monkeypatch.setenv(var, val)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    from clip_scanner import claude_code
+
+    claude_code.clear_plan_stop()
 
     class F:
         path = exe
@@ -90,14 +108,20 @@ def fake(tmp_path, monkeypatch):
             monkeypatch.setenv("FAKE_CLAUDE_MODE", m)
 
         @staticmethod
-        def auth(a):
+        def auth(a, provider="firstParty"):
             monkeypatch.setenv("FAKE_CLAUDE_AUTH", a)
+            monkeypatch.setenv("FAKE_CLAUDE_PROVIDER", provider)
+
+        @staticmethod
+        def setenv(k, v):
+            monkeypatch.setenv(k, v)
 
     return F
 
 
 def make_llm(fake, tmp_path, **cc):
-    cfg = Config.model_validate({"judging": {"claude_code": {"path": str(fake.path), **cc}}})
+    cfg = Config.model_validate({"general": {"cache_dir": str(fake.tmp / "cache")},
+                                 "judging": {"claude_code": {"path": str(fake.path), **cc}}})
     tracker = CostTracker(cfg)
     llm = LLM(cfg, tmp_path / "llm", tracker, backend="claude-code")
     tracker.billing = llm.billing
@@ -136,7 +160,8 @@ def test_request_runs_on_subscription_with_everything_else_off(fake, tmp_path):
     assert after("--input-format") == "stream-json" and after("--output-format") == "stream-json"
     assert json.loads(after("--json-schema"))["additionalProperties"] is False
     assert c["system"] == "HANDBOOK\n\nROLE"
-    assert c["env"]["ANTHROPIC_API_KEY"] is None and c["env"]["ANTHROPIC_AUTH_TOKEN"] is None
+    for var in LEAKY:
+        assert c["env"][var] is None, var
     assert c["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16000"
     assert c["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
     content = c["message"]["message"]["content"]
@@ -151,10 +176,13 @@ def test_request_runs_on_subscription_with_everything_else_off(fake, tmp_path):
     assert again.cached and again.data == res.data and len(fake.calls()) == 1
 
 
-@pytest.mark.parametrize("auth, kind", [("api_key", "api_billing"), ("api_key_helper", "api_billing"),
-                                        ("third_party", "api_billing"), ("none", "auth")])
-def test_refuses_anything_but_a_subscription_login(fake, tmp_path, auth, kind):
-    fake.auth(auth)
+@pytest.mark.parametrize("auth, provider, kind", [
+    ("api_key", "firstParty", "api_billing"), ("api_key_helper", "firstParty", "api_billing"),
+    ("third_party", "bedrock", "api_billing"), ("none", "firstParty", "auth"),
+    ("oauth_token", "firstParty", "api_billing"),   # a Console profile / federation login reports this too
+    ("claude.ai", "vertex", "api_billing")])
+def test_refuses_anything_but_a_subscription_login(fake, tmp_path, auth, provider, kind):
+    fake.auth(auth, provider)
     llm, _ = make_llm(fake, tmp_path)
     with pytest.raises(LLMError) as e:
         call(llm)
@@ -166,10 +194,12 @@ def test_refuses_anything_but_a_subscription_login(fake, tmp_path, auth, kind):
     assert again.value.kind == kind and fake.calls() == []
 
 
-def test_oauth_token_login_counts_as_subscription(fake, tmp_path):
-    fake.auth("oauth_token")  # `claude setup-token`
+def test_setup_token_counts_as_subscription(fake, tmp_path):
+    fake.auth("oauth_token")
+    fake.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-subscription")  # `claude setup-token`
     llm, _ = make_llm(fake, tmp_path)
     assert call(llm).data["score"] == 7.0
+    assert fake.calls()[0]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-subscription"
 
 
 def test_run_that_reports_an_api_key_is_killed(fake, tmp_path):
@@ -191,18 +221,72 @@ def test_usage_limit_stops_the_run(fake, tmp_path):
     assert len(fake.calls()) == 1
 
 
-def test_extra_usage_stops_after_the_call(fake, tmp_path):
+def test_extra_usage_kills_the_run_and_stops_every_later_scan(fake, tmp_path):
     fake.mode("overage")
-    llm, _ = make_llm(fake, tmp_path)
-    assert call(llm).data["score"] == 7.0         # already paid for: kept
-    assert llm.fatal is not None and llm.fatal.kind == "extra_usage"
+    llm, tracker = make_llm(fake, tmp_path)
+    with pytest.raises(LLMError) as e:
+        call(llm)                                 # killed as soon as Claude Code reports paid usage
+    assert e.value.kind == "extra_usage" and llm.fatal is not None
+    assert tracker.summary()["extra_usage_used"]
     with pytest.raises(LLMError):
         call(llm, text="next")
+    # A new scan (a queued UI link, the next calibration clip, a new process) doesn't try again either.
+    llm2, _ = make_llm(fake, tmp_path / "next-scan")
+    with pytest.raises(LLMError) as e2:
+        call(llm2, text="another video")
+    assert e2.value.kind == "extra_usage" and "delete" in str(e2.value)
+    from clip_scanner import claude_code
+
+    claude_code.clear_plan_stop()                 # forget the in-memory stop: the file alone must hold
+    llm3, _ = make_llm(fake, tmp_path / "new-process")
+    with pytest.raises(LLMError):
+        call(llm3, text="after restart")
     assert len(fake.calls()) == 1
-    llm2, _ = make_llm(fake, tmp_path / "b", allow_extra_usage=True)
-    call(llm2)
-    call(llm2, text="next")
-    assert llm2.fatal is None
+
+
+def test_plan_stop_expires_at_the_reset(fake, tmp_path):
+    from clip_scanner import claude_code
+
+    llm, _ = make_llm(fake, tmp_path)
+    llm.plan_stop_file.parent.mkdir(parents=True, exist_ok=True)
+    llm.plan_stop_file.write_text(json.dumps({"kind": "usage_limit", "message": "limit", "until": 1.0}))
+    assert claude_code.plan_stop(llm.plan_stop_file) is None and not llm.plan_stop_file.exists()
+    assert call(llm).data["score"] == 7.0
+
+
+def test_a_stop_kills_requests_already_running(fake, tmp_path):
+    import threading
+    import time
+
+    fake.setenv("FAKE_CLAUDE_SLOW", "30")
+    llm, _ = make_llm(fake, tmp_path)
+    errors = []
+
+    def slow():
+        try:
+            call(llm, text="FAKE_MODE:slow")
+        except LLMError as e:
+            errors.append(e)
+
+    t0 = time.time()
+    th = threading.Thread(target=slow)
+    th.start()
+    time.sleep(1.5)                               # the slow request is in flight
+    with pytest.raises(LLMError):
+        call(llm, text="FAKE_MODE:overage")
+    th.join(timeout=15)
+    assert not th.is_alive() and time.time() - t0 < 15
+    assert errors and errors[0].kind == "extra_usage"
+
+
+def test_extra_usage_allowed_is_reported(fake, tmp_path):
+    fake.mode("overage")
+    llm, tracker = make_llm(fake, tmp_path, allow_extra_usage=True)
+    assert call(llm).data["score"] == 7.0
+    fake.mode("overage_error")
+    with pytest.raises(LLMError):
+        call(llm, text="next")
+    assert llm.fatal is None and tracker.summary()["extra_usage_used"]
 
 
 def test_other_model_answering_is_flagged(fake, tmp_path):
@@ -232,7 +316,8 @@ def test_timeout_kills_the_run(fake, tmp_path):
 
 
 def test_missing_cli(tmp_path):
-    cfg = Config.model_validate({"judging": {"claude_code": {"path": str(tmp_path / "nope" / "claude")}}})
+    cfg = Config.model_validate({"general": {"cache_dir": str(tmp_path / "cache")},
+                                 "judging": {"claude_code": {"path": str(tmp_path / "nope" / "claude")}}})
     llm = LLM(cfg, tmp_path / "llm", CostTracker(cfg), backend="claude-code")
     with pytest.raises(LLMError) as e:
         call(llm)
@@ -312,3 +397,51 @@ def test_live_claude_code_smoke(tmp_path):
                    messages=[{"role": "user", "content": "Why might a 2-hour food review have no clip-worthy moments?"}],
                    output=Diagnosis, effort="low", max_tokens=4000)
     assert res.data["one_line_read"] and not res.fallback_used
+
+
+def test_cut_short_recall_is_never_no_great_clips(fake, tmp_path):
+    from clip_scanner.judging.runner import run_judging
+
+    RESP = dict(RESPONSES, first_two_seconds=verdict(score=6.0, great=False))
+    (fake.tmp / "responses.json").write_text(json.dumps(RESP))
+    llm, _ = make_llm(fake, tmp_path)
+    cands, ctx = judging_context(llm)
+    assert run_judging(cands, ctx, max_clips=5).status == "complete"     # everything read: a real verdict
+    res = run_judging(cands, ctx, max_clips=5, recall_complete=False)
+    assert res.status == "incomplete" and not res.great and res.diagnosis == ""
+    assert any("proposer" in n for n in res.notes)
+
+
+def test_ctrl_c_stops_queued_candidates(fake, tmp_path, monkeypatch):
+    from clip_scanner.candidates import Candidate
+    from clip_scanner.judging import runner
+
+    llm, _ = make_llm(fake, tmp_path, timeout_s=60)
+    llm.cfg.judging.max_concurrency = 1
+    _, ctx = judging_context(llm)
+    cands = [Candidate(id=f"k{i}", segments=[(10.0, 40.0)], peak=15.0, origin="signal", score=1.0 - i / 10,
+                       reason="") for i in range(6)]
+    seen = []
+
+    def judge(c, *a, **k):
+        seen.append(c.id)
+        if len(seen) == 2:
+            raise KeyboardInterrupt
+        return runner.decide(c.id, [], None, None, None, ctx.cfg)
+
+    monkeypatch.setattr(runner, "judge_candidate", judge)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_judging(cands, ctx, max_clips=5)
+    assert len(seen) <= 3, seen                   # not all six
+
+
+def test_proposer_retries_claude_code_schema_failures(fake, tmp_path):
+    from clip_scanner.proposer import propose
+    from clip_scanner.signals import HOP  # noqa: F401  (signals import side effects)
+    from clip_scanner.transcribe import Transcript, Word
+
+    fake.mode("schema_retries")
+    llm, _ = make_llm(fake, tmp_path)
+    words = [Word(round(i * 0.4, 2), round(i * 0.4 + 0.3, 2), f"word{i % 7}") for i in range(1500)]
+    moments, complete = propose(llm, Transcript(words=words), 600.0, llm.cfg)
+    assert not complete and moments == []         # not cached, not deterministic: retry next run

@@ -134,7 +134,6 @@ class ClaudeCodeCfg(_Section):
     path: str = ""                    # blank: find `claude` on PATH
     timeout_s: float = Field(900.0, gt=0)
     allow_extra_usage: bool = False   # False: stop judging as soon as Claude Code draws on paid extra usage
-    allow_api_billing: bool = False   # False: refuse to run if Claude Code would bill an API key
 
 
 class JudgingCfg(_Section):

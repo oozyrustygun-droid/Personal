@@ -30,7 +30,8 @@ Ran on your Claude plan through Claude Code: $0 in API charges …
 brew install ffmpeg-full uv
 cd ~/clip-scanner
 uv sync                                  # Python 3.12 + all deps (mlx-whisper on Apple Silicon)
-claude                                   # Claude Code: log in once with your Claude account (/login), then exit
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code (skip if `claude --version` already works)
+claude                                   # log in once with your Claude account (/login), then /exit
 uv run clip-scanner doctor               # checks ffmpeg/libass, the Claude Code login, backends
 ```
 
@@ -42,12 +43,16 @@ account. The scanner protects you from paying by accident:
 
 - It hides `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` from Claude Code (in this mode Claude Code would
   otherwise bill a key that happens to be set in your shell).
-- It refuses to run if Claude Code is logged in with an API key or a cloud account rather than your
-  Claude subscription, and kills any request that reports an API key as its source.
+- It hides every other `ANTHROPIC_*` setting too (gateway URLs, Console profiles, federation
+  credentials) and the cloud-provider switches, so Claude Code can only use your own Claude login.
+- It refuses to run if Claude Code is signed in with anything but your Claude subscription (an API key,
+  a Console account or a cloud account), and kills any request that reports an API key as its source.
 - If your plan's usage limit is reached, the scan stops and says when the limit resets. If you have
-  paid "extra usage" turned on, it stops as soon as Claude Code starts using it
-  (`[judging.claude_code] allow_extra_usage = false`). Judged clips are cached, so re-running after the
-  reset continues where it stopped.
+  paid "extra usage" turned on, the moment Claude Code reports using it the request is killed, every
+  other running request is killed, and no new one starts until your limit resets, including in later
+  scans and queued links (`[judging.claude_code] allow_extra_usage = false`). Judged clips are cached,
+  so re-running after the reset continues where it stopped. `clip-scanner doctor` shows when judging
+  is paused.
 
 The judges run with every Claude Code tool switched off and none of your CLAUDE.md, memory, MCP
 servers, plugins, hooks or settings files loaded: they see only the clip and the judging handbook.

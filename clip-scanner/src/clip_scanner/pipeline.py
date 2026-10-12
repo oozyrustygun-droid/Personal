@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from .candidates import Candidate, candidates_stage
 from .cli_common import BACKEND_LABEL, resolve_backend
-from .cache import Workspace
+from .cache import Workspace, read_json
 from .config import Config, load_config
 from .cost import CostTracker
 from .ingest import VideoMeta, ingest
@@ -29,6 +29,7 @@ class Analysis:
     llm: LLM
     tracker: CostTracker
     candidates_fp: str
+    recall_complete: bool = True  # False if the transcript proposer skipped part of the video
 
 
 def make_llm(cfg: Config, ws: Workspace, tracker: CostTracker, judge_backend: str | None = None,
@@ -71,6 +72,7 @@ def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_ba
                       f"{'on' if signals.events_available else 'off'}")
     tracker = CostTracker(cfg)
     llm = make_llm(cfg, ws, tracker, judge_backend, scripted_judge, refresh="judging" in rerun)
+    recall_complete = True
     with stage("Candidates") as st:
         if single_window:
             from .calibrate import whole_clip_candidate
@@ -81,10 +83,11 @@ def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_ba
             cands, c_fp = candidates_stage(ws, transcript, signals, s_fp, meta.duration, cfg, llm, console=out,
                                            force="candidates" in rerun)
             st["cached"] = before == c_fp and "candidates" not in rerun
-        st["note"] = f"{len(cands)} candidate window(s)"
+            recall_complete = not read_json(ws.path("candidates.json")).get("proposer_incomplete", False)
+        st["note"] = f"{len(cands)} candidate window(s)" + ("" if recall_complete else " (proposer incomplete)")
     with stage("Keyframes"):
         frames = extract_keyframes(ws, meta.path, cands, signals, cfg, c_fp)
-    return Analysis(meta, ws, transcript, signals, cands, frames, llm, tracker, c_fp)
+    return Analysis(meta, ws, transcript, signals, cands, frames, llm, tracker, c_fp, recall_complete)
 
 
 def print_estimate(est: dict) -> None:
@@ -148,7 +151,8 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
 
     with stage("Judging"):
         console.print(f"  [dim]judging on {BACKEND_LABEL.get(backend, backend)}[/dim]")
-        result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate)
+        result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate,
+                             recall_complete=a.recall_complete)
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")
         return {"code": 0, "out_dir": out_dir, "status": "dry_run"}
@@ -175,4 +179,4 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
     for p in prune_stale_clips(out_dir, keep):
         console.print(f"  [dim]removed stale export that is no longer GREAT: {p.name}[/dim]")
     print_report(a, result, cfg, paths, explain_rejects=args.explain_rejects, exported=exported)
-    return {"code": 0, "out_dir": out_dir, "status": result.status}
+    return {"code": 0, "out_dir": out_dir, "status": result.status, "notes": result.notes}

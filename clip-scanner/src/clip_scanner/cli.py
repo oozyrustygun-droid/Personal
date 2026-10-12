@@ -95,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_scan_cli(args)
     except KeyboardInterrupt:
+        from .claude_code import stop_all_runs
+
+        stop_all_runs()
         console.print("\n[yellow]Interrupted. Finished stages are cached; re-run to resume.[/yellow]")
         return 130
 

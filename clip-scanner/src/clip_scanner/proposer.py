@@ -81,7 +81,10 @@ def propose(llm: LLM, transcript: Transcript, duration: float, cfg: Config, *,
         except LLMError as e:
             if console:
                 console.print(f"  [yellow]proposer skipped chunk {lo:.0f}-{hi:.0f}s: {e}[/yellow]")
-            if e.kind not in ("refusal", "schema"):  # deterministic failures won't improve on retry
+            # A refusal or schema failure is deterministic once it is in the response cache (the API
+            # backend caches them at once); anything else means this chunk must be retried.
+            deterministic = e.kind in ("refusal", "schema") and (e.cached or llm.backend != "claude-code")
+            if not deterministic:
                 complete = False
             if llm.fatal is not None:  # no login / plan limit / API billing refused: later chunks can't run
                 break

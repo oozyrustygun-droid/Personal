@@ -145,8 +145,9 @@
       <span class="err" id="formerr"></span>
       <button class="primary" id="scan">Scan</button>
     </div>
-    <p class="hint">Scans run one at a time on this computer. You'll be asked to approve before judging spends more than your
-      configured limit. Re-scanning a video reuses everything already paid for.</p>
+    <p class="hint">Scans run one at a time on this computer. Judging runs on your Claude plan through Claude Code (no API
+      charges); with the paid API backend you approve any spend above your limit first. Re-scanning a video reuses
+      everything already done.</p>
   </section>
 
   <h2>Scans</h2>
@@ -229,7 +230,7 @@ function jobCard(j) {
   let extra = "";
   if (j.judging && j.judging.total && (j.status === "running" || j.status === "done")) {
     extra += `<div class="hint">Judged ${j.judging.done} of ${j.judging.eligible} candidates that passed the measured gates
-      (${j.judging.total} proposed) · <b>${j.judging.great}</b> GREAT so far</div>`;
+      (${j.judging.total} proposed) · <b>${j.judging.great}</b> GREAT so far${j.judging.errors ? ` · <span class="err">${j.judging.errors} could not be judged</span>` : ""}</div>`;
   }
   if (j.estimate && j.estimate.billing === "subscription" && j.estimate.uncached > 0 && j.status === "running") {
     const e = j.estimate;
@@ -243,7 +244,8 @@ function jobCard(j) {
   }
   if (j.status === "done" && j.report_dir) {
     extra += `<div class="row"><button class="primary small" data-open="${esc(j.report_dir)}">View results</button>
-      ${j.result_status === "unavailable" ? '<span class="hint">Judging did not run; previous results were kept.</span>' : ""}</div>`;
+      ${j.result_status === "unavailable" ? '<span class="hint">Judging did not run (any earlier results for this video were kept).</span>' : ""}
+      ${j.result_status === "incomplete" ? '<span class="hint">Incomplete: this is not a full verdict on the video. Re-add the link to finish.</span>' : ""}</div>`;
   }
   if (j.status === "done" && (j.notes || []).length) {
     extra += j.notes.map((n) => `<div class="err">${esc(n)}</div>`).join("");
@@ -383,7 +385,7 @@ async function openReport(dir) {
   if (rep.cost) {
     const c = rep.cost;
     const line = c.billing === "subscription"
-      ? `Ran on your Claude plan through Claude Code: <b>$0 in API charges</b> (same tokens at API prices: ${usd(c.api_equivalent_usd || 0)})`
+      ? `Ran on your Claude plan through Claude Code: <b>$0 in API charges</b> (same tokens at API prices: ${usd(c.api_equivalent_usd || 0)})${c.extra_usage_used ? ' · <span class="err">Claude Code reported paid extra usage during this run</span>' : ""}`
       : c.billing === "none" ? "Scripted test judge: nothing spent"
       : `API cost of the last run: <b>${usd(c.total_usd)}</b> (cached calls are free)`;
     html += `<p class="hint">${line}${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}</p>`;

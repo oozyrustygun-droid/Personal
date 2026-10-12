@@ -278,7 +278,9 @@ def diagnose(decisions: list[Decision], ctx: JudgeContext) -> str:
 
 
 def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, console=None,
-                full_panel: bool = False, on_estimate=None) -> JudgingResult:
+                full_panel: bool = False, on_estimate=None, recall_complete: bool = True) -> JudgingResult:
+    """recall_complete=False: candidate generation was cut short (the transcript proposer couldn't read
+    part of the video), so "no GREAT clips" would not be a verdict about the whole video."""
     cfg = ctx.cfg
     dets = {c.id: deterministic_gates(c, ctx.transcript, ctx.signals, cfg) for c in cands}
     meas = {c.id: clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob) for c in cands}
@@ -311,9 +313,19 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
         decisions[first.candidate_id] = first
         # After a fatal error (no login, API billing refused, plan limit) live requests fail at once,
         # but candidates judged on an earlier run still come back from the cache.
-        with ThreadPoolExecutor(max_workers=cfg.judging.max_concurrency) as ex:
+        ex = ThreadPoolExecutor(max_workers=cfg.judging.max_concurrency)
+        try:
             for d in ex.map(work, eligible[1:]):
                 decisions[d.candidate_id] = d
+        except BaseException:
+            # Ctrl-C or a crash: don't let queued candidates keep starting model calls on the way out.
+            ex.shutdown(wait=False, cancel_futures=True)
+            from ..claude_code import stop_all_runs
+
+            stop_all_runs()
+            raise
+        finally:
+            ex.shutdown(wait=True)
     fatal = ctx.llm.fatal or fatal_before
     if fatal is not None:
         notes.append(f"Judging stopped: {str(fatal).split(': ', 1)[-1]}")
@@ -326,6 +338,10 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
         status = "unavailable" if fatal is not None and not judged_any else "incomplete"
     elif fatal is not None:
         status = "incomplete"  # e.g. the transcript proposer was cut off: recall is not what it should be
+    if not recall_complete and status == "complete" and not great:
+        status = "incomplete"
+        notes.append("The transcript proposer couldn't read part of the video, so some moments were never "
+                     "considered. Re-run to finish (everything already done is cached).")
     if ordered and not ctx.signals.events_available and cfg.gates.require_music_check and status == "complete":
         # Every candidate failed the music gate because music couldn't be measured: that's not a
         # verdict about the video.
@@ -336,6 +352,10 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
     by_id = {c.id: c for c in cands}
     for d in great:
         result.packaging[d.candidate_id] = package(by_id[d.candidate_id], d, ctx)
-    if not great and status != "unavailable" and ordered and ctx.llm.fatal is None:
+    if not great and status == "complete" and ordered and ctx.llm.fatal is None:
         result.diagnosis = diagnose(ordered, ctx)
+    if ctx.llm.fatal is not None and fatal is None:
+        # Stopped during packaging or the diagnosis: the verdicts stand, but say why captions are basic.
+        result.notes.append(f"Stopped after judging: {str(ctx.llm.fatal).split(': ', 1)[-1]} Clips judged GREAT "
+                            "are still GREAT; their caption/hook text may be a plain fallback.")
     return result

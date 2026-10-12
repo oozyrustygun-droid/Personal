@@ -60,6 +60,7 @@ class CostTracker:
     cfg: Config
     calls: list[dict] = field(default_factory=list)
     billing: str = "api"  # api | subscription | none
+    extra_usage_used: bool = False  # Claude Code reported paid extra usage on at least one call
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(self, purpose: str, usages: list[Usage], cached: bool) -> None:
@@ -89,7 +90,7 @@ class CostTracker:
                 for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
                     b[k] += c[k]
         return {"total_usd": round(self.total(), 4), "api_equivalent_usd": round(self.api_equivalent(), 4),
-                "billing": self.billing, "by_purpose": by}
+                "billing": self.billing, "extra_usage_used": self.extra_usage_used, "by_purpose": by}
 
 
 def estimate_tokens(text: str) -> int:
