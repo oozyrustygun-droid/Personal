@@ -77,4 +77,5 @@ def make_script(rules: dict) -> ScriptFn:
             return {"moments": rules.get("proposals", [])}
         raise ValueError(f"scripted backend has no rule for purpose {purpose!r}")
 
+    script.fingerprint = json.dumps(rules, sort_keys=True)  # part of the response-cache key
     return script

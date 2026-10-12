@@ -113,13 +113,17 @@ def run_scan_cli(args: argparse.Namespace) -> int:
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")
         return 0
+    from .export import clip_path, export_clips, prune_stale_clips
+
     paths = write_reports(a, result, cfg, explain_rejects=args.explain_rejects)
     exported = {}
     if result.great and not args.no_cut:
-        from .export import export_clips
-
         with stage("Export"):
             exported = export_clips(a, result, cfg, paths["dir"], force="export" in set(args.rerun))
         paths = write_reports(a, result, cfg, explain_rejects=args.explain_rejects, exported=exported)
+    # Keep exports of clips that are GREAT now (even under --no-cut); remove anything else.
+    keep = {str(clip_path(paths["dir"], r, d.candidate_id, result.packaging)) for r, d in enumerate(result.great, 1)}
+    for p in prune_stale_clips(paths["dir"], keep):
+        console.print(f"  [dim]removed stale export that is no longer GREAT: {p.name}[/dim]")
     print_report(a, result, cfg, paths, explain_rejects=args.explain_rejects, exported=exported)
     return 0 if result.status != "unavailable" else 3

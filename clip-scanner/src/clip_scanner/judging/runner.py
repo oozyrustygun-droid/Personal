@@ -185,12 +185,12 @@ def _first_request_cached(c: Candidate, persona: str, ctx: JudgeContext) -> bool
     measurements = clip_measurements(c, ctx.transcript, ctx.signals)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), ctx.cfg)
     system = prompts.system_blocks(ctx.handbook, ctx.video_text, persona, j.cache_ttl)
-    from ..llm import _hash_request, strict_schema
+    from ..llm import strict_schema
 
     rh = ctx.llm.request_hash(model=j.model, system=system, messages=[{"role": "user", "content": packet}],
                               schema=strict_schema(JudgeVerdict), effort=j.effort)
     if ctx.llm.backend == "scripted":
-        rh = _hash_request({"scripted": _meta(c, ctx, persona=persona), "purpose": "judge", "h": rh})
+        rh = ctx.llm.scripted_hash("judge", _meta(c, ctx, persona=persona), rh)
     return ctx.llm.cached_result("judge", rh) is not None
 
 

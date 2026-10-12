@@ -116,12 +116,16 @@ class LLM:
         return _hash_request({"backend": self.backend, "model": model, "system": system, "messages": messages,
                               "schema": schema, "effort": effort})
 
+    def scripted_hash(self, purpose: str, meta: dict, rh: str) -> str:
+        return _hash_request({"scripted": meta, "purpose": purpose, "h": rh,
+                              "rules": getattr(self.script, "fingerprint", "")})
+
     def call(self, *, purpose: str, model: str, system: list[dict], messages: list[dict],
              output: type[BaseModel], effort: str, max_tokens: int, meta: dict | None = None) -> LLMResult:
         schema = strict_schema(output)
         rh = self.request_hash(model=model, system=system, messages=messages, schema=schema, effort=effort)
         if self.backend == "scripted":
-            rh = _hash_request({"scripted": meta or {}, "purpose": purpose, "h": rh})
+            rh = self.scripted_hash(purpose, meta or {}, rh)
         hit = None if self.refresh else self.cached_result(purpose, rh)
         if hit is not None:
             usages = [Usage.from_json(u) for u in hit.get("usages", [])]
