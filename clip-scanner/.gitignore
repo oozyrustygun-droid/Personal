@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+clip-scanner-output/
+/out/
+# calibration media is personal data; keep only the manifest + READMEs in git
+calibration/clips/**/*
+!calibration/clips/**/.gitkeep
+!calibration/clips/**/README.md

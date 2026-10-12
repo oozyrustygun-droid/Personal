@@ -1,0 +1,148 @@
+# clip-scanner configuration
+#
+# Every threshold that decides what counts as GREAT lives here, so you can tighten or loosen
+# the bar without touching code. Unknown keys are an error, which catches typos.
+# Lookup order: --config PATH, then $CLIP_SCANNER_CONFIG, then ./config.toml, then this file.
+#
+# Changing a [judging] or [devils_advocate] *threshold* never re-bills you, because raw judge
+# outputs are cached per request. Changing a prompt input (model, effort, style guide,
+# keyframes, candidate boundaries) produces new requests, and those are billed.
+
+[general]
+cache_dir = "~/.cache/clip-scanner"     # per-video stage cache (downloads, transcripts, judgments)
+output_dir = "./clip-scanner-output"    # reports and exported clips
+max_clips = 5                           # cap on GREAT clips reported/exported (never fills with non-GREAT)
+
+[ingest]
+# Best stream at or below 1080p, preferring mp4/m4a so no re-encode is needed.
+format = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b"
+cookies_from_browser = ""               # e.g. "chrome" for age-gated or members-only videos
+
+[transcribe]
+backend = "auto"         # auto | mlx | faster-whisper | pocketsphinx (offline, test-only quality)
+model = "large-v3"       # large-v3 | large-v3-turbo (about 3x faster, slightly worse) | small | tiny.en ...
+language = "en"          # "" = auto-detect
+beam_size = 5
+vad_filter = true
+compute_type = "auto"    # faster-whisper only: auto | int8 | float16 ...
+
+[diarization]
+enabled = false          # needs `uv sync --extra diarize` and HF_TOKEN (pyannote models accepted)
+model = "pyannote/speaker-diarization-3.1"
+
+[signals]
+silence_db = -42.0             # 100 ms frames quieter than this (dBFS) count as silent
+audio_events = "yamnet"        # yamnet (laughter/crowd/scream/music detection) | none
+scene_threshold = 27.0         # PySceneDetect ContentDetector threshold
+proxy_height = 360             # low-res analysis proxy for scene detection
+proxy_fps = 15
+hwaccel = "auto"               # auto (videotoolbox on macOS) | none
+
+[candidates]
+min_candidates = 15
+max_candidates = 40
+min_len_s = 12.0
+max_len_s = 60.0
+target_lens_s = [14.0, 20.0, 28.0, 38.0, 52.0]   # window-length variants tried around each peak
+peak_min_separation_s = 8.0
+llm_proposer = true                    # cheap transcript pass to catch deadpan/verbal moments
+proposer_model = "claude-haiku-5-5"
+proposer_effort = "low"
+proposer_chunk_s = 600.0
+tighten_dead_air = true                # jump-cut silent gaps out of a window instead of discarding it
+tightened_gap_s = 0.35                 # what a removed gap shrinks to
+pause_break_s = 0.7                    # word gap that counts as a sentence/beat boundary
+snap_search_s = 6.0                    # how far a boundary may move to land on a sentence edge
+end_tail_s = 0.35                      # breathing room after the last word (never into the next word)
+nms_iou = 0.5                          # overlapping candidates above this IoU are de-duplicated
+
+[gates]
+# Deterministic gates run before any API spend. Failing one rejects the clip.
+min_len_s = 12.0
+max_len_s = 60.0
+hook_window_s = 2.0            # something must happen (speech onset or reaction audio) inside this
+max_dead_air_s = 1.5           # longest allowed stretch with no words, no reaction audio, no spike
+music_prob = 0.5               # YAMNet music score that counts as "music present"
+music_bed_max_fraction = 0.5   # music present for more than this share of the clip -> reject
+
+[judging]
+model = "claude-opus-5-5"
+effort = "high"                # low | medium | high | xhigh | max
+judges = ["jaded_scroller", "joe_superfan", "shorts_editor"]
+overall_min = 8.5              # EVERY judge's overall rating must be >= this
+rubric_mean_min = 7.5          # and each judge's weighted rubric mean >= this (anti-inflation)
+consistency_allowance = 1.0    # effective = min(overall, rubric_mean + allowance)
+gate_policy = "any"            # any: one judge failing one gate kills the clip | majority
+short_circuit = true           # stop the panel at the first rejecting judge (same outcome, ~1/3 cost)
+max_concurrency = 4
+keyframes_per_candidate = 7
+keyframe_width = 768
+context_window_s = 20.0        # transcript shown before/after the clip, marked NOT IN CLIP
+max_output_tokens = 16000
+confirm_above_usd = 5.0        # ask before judging if the estimate exceeds this (--yes skips)
+server_fallbacks = true        # retry policy declines on Anthropic's recommended fallback model
+cache_ttl = "5m"               # 5m | 1h  (prompt-cache TTL for the shared prefixes)
+
+[judging.criterion_floors]     # every judge must also clear these per-criterion minimums
+hook_strength = 8.0
+payoff = 8.0
+
+[judging.weights]              # weights for the rubric mean
+hook_strength = 1.5
+payoff = 1.5
+emotional_intensity = 1.0
+shareability = 1.25
+comment_bait = 0.75
+rewatch_loop = 0.75
+joe_signature = 1.0
+visual_strength = 0.75
+
+[devils_advocate]
+enabled = true
+min_survival_confidence = 7.0  # arbiter must rate survival >= this (0-10) or the clip is dropped
+
+[export]
+width = 1080
+height = 1920
+preroll_s = 0.3                # clamped so it never includes the tail of the previous word
+crop_mode = "face"             # face (tracked, center-weighted) | center
+face_sample_fps = 6.0
+face_smoothing_s = 0.6         # higher = steadier camera
+face_deadzone = 0.08           # fraction of crop width the face may drift before the crop follows
+crf = 18
+preset = "medium"
+audio_bitrate = "192k"
+
+[captions]
+enabled = true
+font = "Arial Black"           # any installed font; falls back via fontconfig
+font_size = 92
+bold = true
+uppercase = true
+primary_color = "&H00FFFFFF"   # ASS colours (&HAABBGGRR): white text
+outline_color = "&H00000000"   # black outline
+outline = 7.0
+shadow = 2.0
+margin_v = 480                 # px from bottom: centered in the lower third, above the app UI
+words_per_caption = 1          # 1 = word-by-word
+max_word_hold_s = 0.9          # a word stays up at most this long through pauses
+
+[calibration]
+manifest = "calibration/manifest.toml"
+hit_min_views = 1000000        # label = hit when views >= this (if no explicit label)
+flop_max_views = 100000        # label = flop when views <= this (if no explicit label)
+
+# USD per million tokens. Verify against https://www.anthropic.com/pricing before trusting estimates.
+[pricing.claude-opus-5-5]
+input = 4.00
+output = 20.00
+cache_write_5m = 5.00
+cache_write_1h = 8.00
+cache_read = 0.20
+
+[pricing.claude-haiku-5-5]
+input = 0.10
+output = 0.50
+cache_write_5m = 0.125
+cache_write_1h = 0.20
+cache_read = 0.01
