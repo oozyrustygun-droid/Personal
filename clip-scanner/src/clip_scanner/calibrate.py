@@ -156,6 +156,17 @@ def loosened(rec: dict, cfg: Config) -> list[str]:
     return out
 
 
+def fully_judged(d: Decision, cfg: Config) -> bool:
+    """Every call for this clip produced a usable answer from the configured model. A clip with a missing
+    judge, devil or arbiter is rejected under every threshold, so it would silently stop constraining
+    the sweep (an unjudged flop can never 'pass')."""
+    if d.stage == "deterministic_gates":
+        return True  # a hard-gate kill is the same at every threshold
+    if d.stage == "error" or d.errors or any(a.get("unavailable") for a in d.assessments):
+        return False
+    return not cfg.devils_advocate.enabled or d.arbiter is not None
+
+
 def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: bool, allow_loosen: bool,
                 unjudged: int = 0, stopped: str = "") -> str | None:
     """Reason to refuse --write-config, or None if writing is safe.
@@ -169,8 +180,9 @@ def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: 
     if stopped:
         return f"judging stopped early ({stopped}); re-run calibrate to finish (finished verdicts are cached)"
     if unjudged:
-        return (f"{unjudged} labelled clip(s) were not fully judged (errors); re-run calibrate to finish "
-                "(finished verdicts are cached)")
+        return (f"{unjudged} labelled clip(s) were not fully judged; re-run calibrate to finish (finished verdicts "
+                "are cached). If the same clips fail again, add --rerun-judging to ask again instead of replaying "
+                "a cached refusal, or leave them out with --only")
     if hits < MIN_PER_LABEL_TO_WRITE or flops < MIN_PER_LABEL_TO_WRITE:
         return (f"need at least {MIN_PER_LABEL_TO_WRITE} hits AND {MIN_PER_LABEL_TO_WRITE} flops that the panel "
                 f"actually scored (have {hits} hits, {flops} flops; clips killed by a hard gate or an error "
@@ -235,7 +247,8 @@ def run_calibrate(args: argparse.Namespace) -> int:
     for e, path in ready:
         console.rule(f"{e.id} ({e.label}{f', {e.views:,} views' if e.views else ''})")
         analyses.append((e, analyze(str(path), cfg, judge_backend=args.judge_backend,
-                                    scripted_judge=args.scripted_judge, single_window=True, quiet=True)))
+                                    scripted_judge=args.scripted_judge, single_window=True, quiet=True,
+                                    rerun={"judging"} if getattr(args, "rerun_judging", False) else frozenset())))
 
     calls_per_clip = len(cfg.judging.judges) + (2 if cfg.devils_advocate.enabled else 0)
     price = cfg.price(cfg.judging.model)
@@ -255,6 +268,7 @@ def run_calibrate(args: argparse.Namespace) -> int:
     labeled: list[tuple[str, Decision]] = []
     table = []
     total_cost = 0.0
+    unjudged_ids: list[str] = []
     with stage("Judging calibration clips"):
         stop = None
         for e, a in analyses:
@@ -271,6 +285,8 @@ def run_calibrate(args: argparse.Namespace) -> int:
             total_cost += a.tracker.total()
             if e.label in ("hit", "flop"):
                 labeled.append((e.label, d))
+                if not fully_judged(d, cfg):
+                    unjudged_ids.append(e.id)
             correct = (e.label == "hit") == d.great if e.label in ("hit", "flop") else None
             table.append({"id": e.id, "label": e.label, "views": e.views, "great": d.great, "stage": d.stage,
                           "min_effective": d.min_effective, "correct": correct,
@@ -284,7 +300,7 @@ def run_calibrate(args: argparse.Namespace) -> int:
     # gate or an error says nothing about overall_min or survival confidence.
     informative = {"hit": 0, "flop": 0}
     for lab, d in labeled:
-        if d.stage in ("panel", "devils_advocate", "great"):
+        if d.stage in ("panel", "devils_advocate", "great") and fully_judged(d, cfg):
             informative[lab] += 1
     current = metrics([(lab, d.great) for lab, d in labeled])
     sw = sweep(labeled, cfg)
@@ -313,10 +329,10 @@ def run_calibrate(args: argparse.Namespace) -> int:
     stopped = sorted({str(a.llm.fatal).split(": ", 1)[-1] for _, a in analyses if a.llm.fatal is not None})
     for msg in stopped:
         console.print(f"[yellow]Judging stopped early: {msg}[/yellow]")
-    unjudged = sum(1 for _, d in labeled if d.stage == "error")
+    unjudged = len(unjudged_ids)
     if unjudged:
-        console.print(f"[yellow]{unjudged} labelled clip(s) could not be judged; the precision figures above treat "
-                      f"them as rejected. Re-run to finish.[/yellow]")
+        console.print(f"[yellow]{unjudged} labelled clip(s) were not fully judged ({', '.join(unjudged_ids)}); the "
+                      f"precision figures above treat them as rejected. Re-run to finish.[/yellow]")
     write_json(out_dir / "calibration.json", {"judge_backend": backend, "informative": informative,
                                               "current": current, "recommended": rec, "note": sw["note"],
                                               "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})

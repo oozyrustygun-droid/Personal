@@ -64,7 +64,8 @@ def main():
         return 0
     if mode in ("overage", "overage_error"):
         # The real CLI reports this from the response headers, before the answer streams.
-        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "isUsingOverage": True,
+        # As the real CLI does: the plan's included usage is "rejected" and paid overage is carrying on.
+        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "isUsingOverage": True,
                                                               "resetsAt": 1893456000}})
         if mode == "overage_error":
             emit({"type": "result", "subtype": "error_max_structured_output_retries", "is_error": True,
@@ -96,7 +97,7 @@ def main():
         "model": served, "content": [{"type": "thinking", "thinking": ""}]}})
     emit({"type": "assistant", "parent_tool_use_id": None, "message": {
         "model": served, "content": [{"type": "tool_use", "name": "StructuredOutput", "input": answer or {}}]}})
-    rl = {"status": "allowed_warning" if mode == "warning" else "allowed",
+    rl = {"status": "rejected" if mode == "overage" else "allowed_warning" if mode == "warning" else "allowed",
           "isUsingOverage": mode == "overage", "resetsAt": 1893456000}
     emit({"type": "rate_limit_event", "rate_limit_info": rl})
     usage = {served: {"inputTokens": 1200, "outputTokens": 300, "cacheReadInputTokens": 0,

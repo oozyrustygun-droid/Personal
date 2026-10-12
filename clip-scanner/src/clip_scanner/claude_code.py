@@ -55,6 +55,7 @@ class ClaudeCodeError(RuntimeError):
         self.kind = kind
         self.fatal = fatal
         self.rate_limit = rate_limit or {}
+        self.from_stop = False  # raised because a recorded plan stop is in force (not a new event)
 
 
 @dataclass
@@ -89,40 +90,52 @@ def stop_all_runs() -> None:
             pass
 
 
-def set_plan_stop(kind: str, message: str, until: float | None, state_file: Path | None = None,
-                  persist: bool = True) -> None:
-    """Record a stop that every later request honours, kill live runs, and (if persist) remember it on
-    disk so a new process doesn't spend one more paid call to rediscover it."""
+def _read_stop_file(state_file: Path) -> dict | None:
+    try:
+        entry = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def set_plan_stop(kind: str, message: str, until: float, state_file: Path | None = None) -> None:
+    """Record a plan stop that every later request honours, remember it on disk (so a new process
+    doesn't spend one more paid call to rediscover it), then kill the live runs. A repeat of the same
+    kind never shortens an existing stop."""
     global _stop
-    entry = {"kind": kind, "message": message, "until": until}
     with _lock:
-        if _stop is None or _stop.get("kind") != kind:
-            _stop = entry
-    stop_all_runs()
-    if persist and state_file is not None:
+        prev = _stop if _stop and _stop.get("kind") == kind else None
+    disk = _read_stop_file(state_file) if state_file is not None and state_file.exists() else None
+    if disk and disk.get("kind") != kind:
+        disk = None
+    until = max([until] + [e["until"] for e in (prev, disk) if e and isinstance(e.get("until"), (int, float))])
+    entry = {"kind": kind, "message": message, "until": until,
+             "file": str(state_file) if state_file is not None else None}
+    if state_file is not None:  # before the kill, so the killed runs find it
         try:
             state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(entry), encoding="utf-8")
             tmp.replace(state_file)
         except OSError:
-            pass
+            entry["file"] = None
+    with _lock:
+        _stop = entry
+    stop_all_runs()
 
 
 def plan_stop(state_file: Path | None = None) -> ClaudeCodeError | None:
-    """The active stop, if any (in memory, else from the state file). Expired stops are cleared."""
+    """The active stop, if any (in memory, else from the state file). Expired stops are cleared, and
+    deleting the state file lifts a stop at once (the documented way to retry sooner)."""
     global _stop
     now = time.time()
     with _lock:
         entry = _stop
-        if entry and entry.get("until") and now >= entry["until"]:
+        if entry and (now >= entry.get("until", 0) or (entry.get("file") and not Path(entry["file"]).exists())):
             _stop = entry = None
     if entry is None and state_file is not None and state_file.exists():
-        try:
-            entry = json.loads(state_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            entry = None
-        if not isinstance(entry, dict) or (entry.get("until") and now >= entry["until"]):
+        entry = _read_stop_file(state_file)
+        if entry is None or not isinstance(entry.get("until"), (int, float)) or now >= entry["until"]:
             try:
                 state_file.unlink()
             except OSError:
@@ -131,9 +144,11 @@ def plan_stop(state_file: Path | None = None) -> ClaudeCodeError | None:
     if not entry:
         return None
     msg = entry.get("message", "judging is paused")
-    if state_file is not None and entry.get("kind") in ("usage_limit", "extra_usage"):
-        msg += f" (To retry sooner, delete {state_file}.)"
-    return ClaudeCodeError(entry.get("kind", "paused"), msg, fatal=True)
+    if entry.get("file"):
+        msg += f" (To retry sooner, delete {entry['file']}.)"
+    err = ClaudeCodeError(entry.get("kind", "paused"), msg, fatal=True, rate_limit={"resetsAt": entry["until"]})
+    err.from_stop = True
+    return err
 
 
 def clear_plan_stop(state_file: Path | None = None) -> None:
@@ -307,7 +322,9 @@ def classify_error(result: dict | None, rate_limit: dict, stderr: str, returncod
         text = str(result.get("result") or "") + " " + " ".join(map(str, result.get("errors") or []))
         status = result.get("api_error_status")
     text = (text + " " + stderr[-2000:]).strip()
-    if rate_limit.get("status") == "rejected" or _USAGE_LIMIT.search(text):
+    # With extra usage allowed, the CLI reports status "rejected" together with isUsingOverage: that is
+    # the plan's included usage running out while paid usage carries on, not a hard stop.
+    if (rate_limit.get("status") == "rejected" and not rate_limit.get("isUsingOverage")) or _USAGE_LIMIT.search(text):
         return usage_limit_error(rate_limit)
     if status in (401, 403) or _AUTH.search(text):
         return ClaudeCodeError("auth", f"Claude Code could not authenticate ({text[:200]}). {LOGIN_HINT}", fatal=True)

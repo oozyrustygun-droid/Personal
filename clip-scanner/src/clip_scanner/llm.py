@@ -211,7 +211,9 @@ class LLM:
         try:
             return output.model_validate(data).model_dump()
         except ValidationError as e:
-            if rh:
+            if rh and self.backend != "claude-code":
+                # Cached so a re-run doesn't pay for it again. On the subscription nothing is paid, and
+                # asking again is the only way a bad answer (e.g. a proposer chunk) gets a second chance.
                 self._store_error(purpose, rh, "schema", str(e)[:2000], usages or [])
             raise LLMError("schema", str(e)[:500]) from e
 
@@ -298,12 +300,11 @@ class LLM:
             if e.rate_limit.get("isUsingOverage"):
                 self.tracker.extra_usage_used = True
             err = LLMError(e.kind, str(e))
-            if e.kind in cc.PLAN_KINDS:
+            if e.kind in cc.PLAN_KINDS and not e.from_stop:
                 # Shared by every scan in this process (and remembered on disk until the reset), so the
                 # next queued video or calibration clip doesn't spend one more paid call to find out.
+                # A login/billing problem is not shared: each new scan re-checks `claude auth status`.
                 cc.set_plan_stop(e.kind, str(e), cc.stop_until(e.rate_limit), self.plan_stop_file)
-            elif e.kind == "api_billing":
-                cc.set_plan_stop(e.kind, str(e), None, persist=False)
             if e.fatal:
                 self._set_fatal(err)
             raise err from e

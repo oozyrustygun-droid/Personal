@@ -67,6 +67,8 @@ def calibrate_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-loosen", action="store_true",
                    help="let --write-config lower a threshold (by default it only ever tightens)")
     p.add_argument("--only", nargs="+", metavar="ID", help="only these manifest ids")
+    p.add_argument("--rerun-judging", action="store_true",
+                   help="ask the judges again instead of reusing cached verdicts")
     _common(p)
     return p
 

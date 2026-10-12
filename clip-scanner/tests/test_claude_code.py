@@ -287,6 +287,7 @@ def test_extra_usage_allowed_is_reported(fake, tmp_path):
     with pytest.raises(LLMError):
         call(llm, text="next")
     assert llm.fatal is None and tracker.summary()["extra_usage_used"]
+    assert not llm.plan_stop_file.exists()        # paid usage is allowed here: not a plan stop
 
 
 def test_other_model_answering_is_flagged(fake, tmp_path):
@@ -412,27 +413,71 @@ def test_cut_short_recall_is_never_no_great_clips(fake, tmp_path):
     assert any("proposer" in n for n in res.notes)
 
 
-def test_ctrl_c_stops_queued_candidates(fake, tmp_path, monkeypatch):
+def test_ctrl_c_kills_running_requests_and_queued_candidates(fake, tmp_path, monkeypatch):
+    import os
+    import signal
+    import threading
+    import time
+
     from clip_scanner.candidates import Candidate
     from clip_scanner.judging import runner
 
+    fake.setenv("FAKE_CLAUDE_SLOW", "30")
     llm, _ = make_llm(fake, tmp_path, timeout_s=60)
-    llm.cfg.judging.max_concurrency = 1
+    llm.cfg.judging.max_concurrency = 2
     _, ctx = judging_context(llm)
     cands = [Candidate(id=f"k{i}", segments=[(10.0, 40.0)], peak=15.0, origin="signal", score=1.0 - i / 10,
-                       reason="") for i in range(6)]
+                       reason="") for i in range(8)]
     seen = []
 
     def judge(c, *a, **k):
         seen.append(c.id)
-        if len(seen) == 2:
-            raise KeyboardInterrupt
+        if c.id != "k0":
+            try:
+                call(llm, text=f"FAKE_MODE:slow {c.id}")  # 30 s requests in flight
+            except LLMError:
+                pass
         return runner.decide(c.id, [], None, None, None, ctx.cfg)
 
     monkeypatch.setattr(runner, "judge_candidate", judge)
+    timer = threading.Timer(1.5, lambda: os.kill(os.getpid(), signal.SIGINT))  # the user presses Ctrl-C
+    t0 = time.time()
+    timer.start()
     with pytest.raises(KeyboardInterrupt):
         runner.run_judging(cands, ctx, max_clips=5)
-    assert len(seen) <= 3, seen                   # not all six
+    timer.cancel()
+    assert time.time() - t0 < 15                  # running `claude -p` requests were killed, not waited for
+    assert len(seen) <= 4, seen                   # queued candidates never started
+
+
+def test_honouring_a_stop_never_shortens_it(fake, tmp_path):
+    from clip_scanner import claude_code
+
+    fake.mode("overage")
+    llm, _ = make_llm(fake, tmp_path)
+    with pytest.raises(LLMError):
+        call(llm)
+    saved = json.loads(llm.plan_stop_file.read_text())
+    assert saved["until"] == 1893456000           # the real reset time from Claude Code
+    for i in range(3):                            # later scans that are refused by the stop
+        with pytest.raises(LLMError):
+            call(make_llm(fake, tmp_path / f"s{i}")[0], text=f"scan {i}")
+    again = json.loads(llm.plan_stop_file.read_text())
+    assert again["until"] == 1893456000 and again["message"] == saved["message"]
+    # Deleting the file is the documented way to retry sooner, and works without a restart.
+    llm.plan_stop_file.unlink()
+    fake.mode("ok")
+    assert call(make_llm(fake, tmp_path / "retry")[0], text="retry").data["score"] == 7.0
+    assert claude_code.plan_stop(llm.plan_stop_file) is None
+
+
+def test_fixing_the_login_works_without_a_restart(fake, tmp_path):
+    fake.auth("api_key")
+    with pytest.raises(LLMError) as e:
+        call(make_llm(fake, tmp_path)[0])
+    assert e.value.kind == "api_billing"
+    fake.auth("claude.ai")                        # user logs in with their Claude account
+    assert call(make_llm(fake, tmp_path / "after")[0]).data["score"] == 7.0
 
 
 def test_proposer_retries_claude_code_schema_failures(fake, tmp_path):

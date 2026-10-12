@@ -85,3 +85,21 @@ def test_write_guard_refuses_small_sets_loosening_and_scripted():
     # A run cut short (plan limit, errors) never writes: unjudged flops would stop constraining the bar.
     assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False, unjudged=1)
     assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False, stopped="usage limit")
+
+
+def test_partly_judged_clips_never_count():
+    """A clip missing a judge, the devil or the arbiter is rejected at every threshold, so it can't
+    constrain the sweep; it must not count as informative and must block --write-config."""
+    from clip_scanner.calibrate import fully_judged
+    from clip_scanner.judging.panel import Decision
+
+    full = Decision("c", False, "panel", ["low"], assessments=[{"unavailable": False}] * 3,
+                    arbiter={"survival_confidence": 5.0}, devil={"x": 1})
+    assert fully_judged(full, CFG)
+    assert not fully_judged(Decision("c", False, "panel", ["low"], errors=["jaded_scroller: timeout"],
+                                     arbiter={"survival_confidence": 5.0}), CFG)
+    assert not fully_judged(Decision("c", False, "panel", ["low"], assessments=[{"unavailable": True}],
+                                     arbiter={"survival_confidence": 5.0}), CFG)   # substitute model answered
+    assert not fully_judged(Decision("c", False, "panel", ["low"], arbiter=None), CFG)  # arbiter never ran
+    assert not fully_judged(Decision("c", False, "error", ["x"]), CFG)
+    assert fully_judged(Decision("c", False, "deterministic_gates", ["gate"]), CFG)
