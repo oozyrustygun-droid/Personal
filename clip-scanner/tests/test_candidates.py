@@ -85,3 +85,26 @@ def test_candidate_time_mapping_roundtrip():
     assert c.to_source(10.0) == pytest.approx(25.0)
     assert c.to_source(c.to_content(27.5)) == pytest.approx(27.5)
     assert Candidate.from_json(c.to_json()) == c
+
+
+def test_payoff_after_a_breath_is_not_cut_off():
+    """A short dip inside a moment ("what is that thing?" … breath … "OH MY GOD") must not end the window."""
+    cfg = Config()
+    tr, sig = synthetic(peaks=())
+    x = sig.series["interest"]
+    x[int(100 / HOP): int(103 / HOP)] = 3.2      # build-up (the found peak)
+    x[int(103 / HOP): int(103.8 / HOP)] = 0.3    # breath
+    x[int(103.8 / HOP): int(106 / HOP)] = 2.8    # the actual payoff
+    cands = generate(tr, sig, sig.duration, cfg)
+    around = [c for c in cands if c.start < 100 < c.end]
+    assert around and all(c.end >= 106.0 for c in around), [(c.start, c.end) for c in around]
+
+
+def test_window_does_not_span_two_moments():
+    cfg = Config()
+    tr, sig = synthetic(peaks=(100.0, 130.0))
+    cands = generate(tr, sig, sig.duration, cfg)
+    for c in cands:
+        assert not (c.start < 101.0 and c.end > 129.0), (c.start, c.end)
+    second = [c for c in cands if c.start < 130.0 <= c.end]
+    assert second and all(c.start >= 101.5 for c in second), [(c.start, c.end) for c in second]

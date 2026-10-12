@@ -16,13 +16,13 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from .boundaries import snap_end, snap_start, split_sentences, straddles, tighten
+from .boundaries import snap_end, snap_start, split_sentences, start_point, straddles, tighten
 from .cache import Workspace, fingerprint, read_json, write_json
 from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 4
+CANDIDATES_VERSION = 5
 
 
 @dataclass
@@ -111,19 +111,25 @@ def find_peaks(curve: np.ndarray, hop: float, min_sep_s: float, quantile: float 
     return sorted(taken)
 
 
-def activity_end(sig: Signals, t: float, max_s: float = 8.0, frac: float = 0.6) -> float:
-    """Where the high-interest region around a peak ends (the payoff usually sits at its end,
-    not at the first maximum of a smoothed plateau)."""
+def activity_end(sig: Signals, t: float, max_s: float = 10.0, frac: float = 0.5, bridge_s: float = 1.5) -> float:
+    """Where the high-interest region around a peak ends. The payoff usually sits at its end, not at
+    the first maximum of a smoothed plateau. Dips shorter than `bridge_s` (a breath between
+    "what is that thing?" and "OH MY GOD") don't end the moment."""
     x = sig.series["interest"]
     i = sig.idx(t)
     if i >= len(x):
         return t
     level = frac * float(x[i])
-    j = i
+    last_above = i
     limit = min(len(x), i + int(max_s / sig.hop))
-    while j + 1 < limit and x[j + 1] >= level:
-        j += 1
-    return max(t, j * sig.hop)
+    k = i
+    while k + 1 < limit:
+        k += 1
+        if x[k] >= level:
+            last_above = k
+        elif (k - last_above) * sig.hop > bridge_s:
+            break
+    return max(t, last_above * sig.hop)
 
 
 def reaction_tail(sig: Signals, t: float, max_s: float = 6.0, lookahead_s: float = 1.0) -> float:
@@ -178,12 +184,17 @@ def heuristic_score(sig: Signals, segments: list[tuple[float, float]], peak: flo
 # ---- generation -----------------------------------------------------------------------------
 
 def build_window(t_start: float, t_payoff: float, transcript: Transcript, sentences, sig: Signals,
-                 duration: float, cfg: Config) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
-    """Snap one (start target, payoff) pair into clean segments, or None if it can't be made valid."""
+                 duration: float, cfg: Config, floor: float = 0.0,
+                 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
+    """Snap one (start target, payoff) pair into clean segments, or None if it can't be made valid.
+    `floor`: earliest allowed start (the end of the previous moment), so one clip = one moment."""
     cc = cfg.candidates
     words = transcript.words
     cuts = [float(c) for c in sig.scene_cuts]
-    s = snap_start(t_start, words, sentences, cuts, cc.snap_search_s)
+    s = snap_start(max(t_start, floor), words, sentences, cuts, cc.snap_search_s)
+    if s is not None and s[0] < floor - 0.3:
+        later = [w for w in sentences if w.start >= floor - 0.3 and w.start < t_payoff]
+        s = (start_point(words, later[0].i0, cuts), later[0].i0) if later else None
     tail = reaction_tail(sig, t_payoff)
     e = snap_end(t_payoff, words, sentences, duration, cuts, cc.snap_search_s, cc.end_tail_s,
                  extend_to=tail if tail > t_payoff else None)
@@ -216,9 +227,14 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         return []
 
     groups: list[dict] = []
-    for p in find_peaks(sig.series["interest"], sig.hop, cc.peak_min_separation_s):
-        groups.append({"peak": p * sig.hop, "origin": "signal", "strength": 0, "kind": "", "why": "",
-                       "starts": None})
+    peaks = [p * sig.hop for p in find_peaks(sig.series["interest"], sig.hop, cc.peak_min_separation_s)]
+    ends = [activity_end(sig, p) for p in peaks]
+    for k, p in enumerate(peaks):
+        # Don't let a window reach back into the previous moment: its payoff would become this
+        # clip's "setup", and the clip would contain two half-moments instead of one whole one.
+        floor = ends[k - 1] + 0.2 if k > 0 and p - peaks[k - 1] < 60.0 else 0.0
+        groups.append({"peak": p, "payoff": ends[k], "floor": min(floor, p - cc.min_len_s * 0.5),
+                       "origin": "signal", "strength": 0, "kind": "", "why": "", "starts": None})
     for m in proposals or []:
         groups.append({"peak": m.payoff_s, "origin": "llm", "strength": m.strength, "kind": m.kind, "why": m.why,
                        "starts": [m.start_s], "end": m.end_s})
@@ -229,11 +245,11 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         variants = []
         targets = list(g["starts"] or [])
         targets += [peak - L for L in cc.target_lens_s]
-        payoff = max(peak, g.get("end", peak) - 0.5) if g["origin"] == "llm" else activity_end(sig, peak)
+        payoff = max(peak, g.get("end", peak) - 0.5) if g["origin"] == "llm" else g["payoff"]
         seen = set()
         for ts in targets:
             ts = max(0.0, ts)
-            built = build_window(ts, payoff, transcript, sentences, sig, duration, cfg)
+            built = build_window(ts, payoff, transcript, sentences, sig, duration, cfg, floor=g.get("floor", 0.0))
             if built is None:
                 continue
             segments, removed = built
