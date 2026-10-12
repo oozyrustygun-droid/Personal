@@ -83,7 +83,7 @@ def propose(llm: LLM, transcript: Transcript, duration: float, cfg: Config, *,
                 console.print(f"  [yellow]proposer skipped chunk {lo:.0f}-{hi:.0f}s: {e}[/yellow]")
             if e.kind not in ("refusal", "schema"):  # deterministic failures won't improve on retry
                 complete = False
-            if e.kind == "auth":
+            if llm.fatal is not None:  # no login / plan limit / API billing refused: later chunks can't run
                 break
             continue
         for m in Proposals.model_validate(res.data).moments:

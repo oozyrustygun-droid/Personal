@@ -12,6 +12,7 @@ import argparse
 import sys
 
 from . import __version__
+from .cli_common import JUDGE_BACKENDS
 from .ui import console
 
 
@@ -24,9 +25,10 @@ def _positive_int(text: str) -> int:
 
 def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", help="path to config.toml (default: ./config.toml, then the repo's)")
-    p.add_argument("-y", "--yes", action="store_true", help="skip the cost confirmation prompt")
-    p.add_argument("--judge-backend", choices=["anthropic", "scripted"], default="anthropic",
-                   help=argparse.SUPPRESS)
+    p.add_argument("-y", "--yes", action="store_true", help="skip the cost confirmation prompt (api backend)")
+    p.add_argument("--judge-backend", choices=JUDGE_BACKENDS, default=None, metavar="{claude-code,api}",
+                   help="where the Claude calls run: claude-code = your Claude subscription through the `claude` "
+                        "CLI, no API credits (default, from config.toml); api = ANTHROPIC_API_KEY, billed per token")
     p.add_argument("--scripted-judge", help=argparse.SUPPRESS)
 
 

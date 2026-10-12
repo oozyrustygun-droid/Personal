@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 
 from .candidates import Candidate, candidates_stage
+from .cli_common import BACKEND_LABEL, resolve_backend
 from .cache import Workspace
 from .config import Config, load_config
 from .cost import CostTracker
@@ -30,19 +31,21 @@ class Analysis:
     candidates_fp: str
 
 
-def make_llm(cfg: Config, ws: Workspace, tracker: CostTracker, judge_backend: str = "anthropic",
+def make_llm(cfg: Config, ws: Workspace, tracker: CostTracker, judge_backend: str | None = None,
              scripted_judge: str | None = None, refresh: bool = False) -> LLM:
-    if judge_backend == "scripted":
+    backend = resolve_backend(cfg, judge_backend)
+    if backend == "scripted":
         from .scripted import load_script
 
         llm = LLM(cfg, ws.path("llm"), tracker, backend="scripted", script=load_script(scripted_judge))
     else:
-        llm = LLM(cfg, ws.path("llm"), tracker)
+        llm = LLM(cfg, ws.path("llm"), tracker, backend=backend)
+    tracker.billing = llm.billing
     llm.refresh = refresh
     return llm
 
 
-def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_backend: str = "anthropic",
+def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_backend: str | None = None,
             scripted_judge: str | None = None, single_window: bool = False, quiet: bool = False,
             on_ingested=None) -> Analysis:
     """Stages 1-4 (+ keyframes). `single_window` treats the whole file as one candidate (calibration).
@@ -86,10 +89,18 @@ def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_ba
 
 def print_estimate(est: dict) -> None:
     if est["uncached"] == 0:
-        console.print(f"  [green]all {est['eligible']} eligible candidate(s) already judged (cached): $0.00[/green]")
+        console.print(f"  [green]all {est['eligible']} eligible candidate(s) already judged (cached): nothing to "
+                      f"spend[/green]")
         return
+    via = " through Claude Code" if est.get("billing") == "subscription" else ""
     console.print(f"  {est['eligible']}/{est['candidates']} candidates passed the deterministic gates; "
-                  f"{est['uncached']} need judging with {est['model']} (effort {est['effort']}).")
+                  f"{est['uncached']} need judging with {est['model']} (effort {est['effort']}){via}.")
+    if est.get("billing") == "subscription":
+        console.print(f"  [bold]Runs on your Claude plan: no API charges.[/bold] About {est['expected_calls']} "
+                      f"model call(s) expected, {est['worst_case_calls']} at most; they count toward your plan's "
+                      f"usage limits. (At API prices this would be ~{fmt_usd(est['expected_usd'])}, shown only "
+                      f"as a size guide.)")
+        return
     console.print(f"  [bold]Cost estimate: ~{fmt_usd(est['expected_usd'])}[/bold] expected "
                   f"(worst case {fmt_usd(est['worst_case_usd'])} if every clip reaches the full panel "
                   f"and the devil's advocate).")
@@ -111,7 +122,8 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
 
     cfg = load_config(args.config)
     max_clips = args.max_clips or cfg.general.max_clips
-    scripted = args.judge_backend == "scripted"
+    backend = resolve_backend(cfg, args.judge_backend)
+    scripted = backend == "scripted"
     state: dict = {}
 
     def on_ingested(meta) -> None:
@@ -119,7 +131,7 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
         state["out_dir"] = out_dir = out_dir_for(meta, cfg, scripted=scripted)
         if not args.dry_run:
             stash_exports(out_dir)
-            write_in_progress(meta, cfg, out_dir, scripted=scripted)
+            write_in_progress(meta, cfg, out_dir, scripted=scripted, backend=backend)
 
     a = analyze(args.source, cfg, rerun=set(args.rerun), judge_backend=args.judge_backend,
                 scripted_judge=args.scripted_judge, on_ingested=on_ingested)
@@ -135,6 +147,7 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
         return confirm(est, cfg)
 
     with stage("Judging"):
+        console.print(f"  [dim]judging on {BACKEND_LABEL.get(backend, backend)}[/dim]")
         result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate)
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")

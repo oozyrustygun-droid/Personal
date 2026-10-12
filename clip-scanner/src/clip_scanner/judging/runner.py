@@ -192,12 +192,14 @@ def estimate_cost(cands: list[Candidate], dets: dict[str, list[GateResult]], ctx
     k = len(j.judges)
     expected_judges = sum(ASSUMED_PASS_RATE ** i for i in range(k)) if j.short_circuit else k
     expected_finalists = n * ASSUMED_PASS_RATE ** k
-    expected = call_cost(round(n * expected_judges + 2 * expected_finalists * cfg.devils_advocate.enabled)) \
-        + devil_cost(max(1.0, expected_finalists) if n else 0)
-    worst = call_cost(n * k + 2 * n * cfg.devils_advocate.enabled) + devil_cost(n)
+    expected_calls = round(n * expected_judges + 2 * expected_finalists * cfg.devils_advocate.enabled)
+    worst_calls = n * k + 2 * n * cfg.devils_advocate.enabled
+    expected = call_cost(expected_calls) + devil_cost(max(1.0, expected_finalists) if n else 0)
+    worst = call_cost(worst_calls) + devil_cost(n)
+    # On the subscription the dollar figures are API-equivalent sizes, not charges.
     return {"candidates": len(cands), "eligible": len(eligible), "uncached": n, "expected_usd": round(expected, 2),
-            "worst_case_usd": round(worst, 2), "prefix_tokens": prefix_tokens, "model": j.model,
-            "effort": j.effort}
+            "worst_case_usd": round(worst, 2), "expected_calls": expected_calls, "worst_case_calls": worst_calls,
+            "prefix_tokens": prefix_tokens, "model": j.model, "effort": j.effort, "billing": ctx.llm.billing}
 
 
 def _first_request_cached(c: Candidate, persona: str, ctx: JudgeContext) -> bool:
@@ -214,8 +216,16 @@ def _first_request_cached(c: Candidate, persona: str, ctx: JudgeContext) -> bool
     return ctx.llm.cached_result("judge", rh) is not None
 
 
+def needs_approval(est: dict, cfg: Config) -> bool:
+    """Only money needs approval: API spend above the configured threshold. Subscription runs cost no
+    API credits (and stop on their own if Claude Code starts using paid extra usage). The scripted test
+    judge follows the API rule so the approval flow stays testable offline."""
+    return (est["uncached"] > 0 and est.get("billing", "api") != "subscription"
+            and est["expected_usd"] > cfg.judging.confirm_above_usd)
+
+
 def confirm_cost(est: dict, cfg: Config, assume_yes: bool, console) -> bool:
-    if est["uncached"] == 0 or assume_yes or est["expected_usd"] <= cfg.judging.confirm_above_usd:
+    if assume_yes or not needs_approval(est, cfg):
         return True
     if not sys.stdin.isatty():
         console.print(f"[yellow]Estimated ${est['expected_usd']:.2f} exceeds confirm_above_usd "
@@ -294,26 +304,28 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
     for c in order:
         if c not in eligible:
             decisions[c.id] = decide(c.id, dets[c.id], None, None, None, cfg)
+    fatal_before = ctx.llm.fatal  # e.g. the proposer already found Claude Code logged out
     if eligible:
         # Judge one clip first so the shared prompt prefix is written to the cache once, not N times.
         first = work(eligible[0])
         decisions[first.candidate_id] = first
-        if any("auth" in e for e in first.errors):
-            notes.append("No Anthropic credentials: judging could not run. Set ANTHROPIC_API_KEY.")
-            for c in eligible[1:]:
-                decisions[c.id] = Decision(c.id, False, "error", ["judging unavailable (no credentials)"],
-                                           deterministic=[g.to_json() for g in dets[c.id]])
-        else:
-            with ThreadPoolExecutor(max_workers=cfg.judging.max_concurrency) as ex:
-                for d in ex.map(work, eligible[1:]):
-                    decisions[d.candidate_id] = d
+        # After a fatal error (no login, API billing refused, plan limit) live requests fail at once,
+        # but candidates judged on an earlier run still come back from the cache.
+        with ThreadPoolExecutor(max_workers=cfg.judging.max_concurrency) as ex:
+            for d in ex.map(work, eligible[1:]):
+                decisions[d.candidate_id] = d
+    fatal = ctx.llm.fatal or fatal_before
+    if fatal is not None:
+        notes.append(f"Judging stopped: {str(fatal).split(': ', 1)[-1]}")
 
     ordered = [decisions[c.id] for c in cands]
     great = rank_great(ordered)[:max_clips]
     status = "complete"
     if any(d.stage == "error" for d in ordered):
-        status = "unavailable" if all(d.stage in ("error", "deterministic_gates") for d in ordered) and \
-            any("credentials" in r for d in ordered for r in d.reasons) else "incomplete"
+        judged_any = any(d.stage not in ("error", "deterministic_gates") for d in ordered)
+        status = "unavailable" if fatal is not None and not judged_any else "incomplete"
+    elif fatal is not None:
+        status = "incomplete"  # e.g. the transcript proposer was cut off: recall is not what it should be
     if ordered and not ctx.signals.events_available and cfg.gates.require_music_check and status == "complete":
         # Every candidate failed the music gate because music couldn't be measured: that's not a
         # verdict about the video.
@@ -324,6 +336,6 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
     by_id = {c.id: c for c in cands}
     for d in great:
         result.packaging[d.candidate_id] = package(by_id[d.candidate_id], d, ctx)
-    if not great and status != "unavailable" and ordered:
+    if not great and status != "unavailable" and ordered and ctx.llm.fatal is None:
         result.diagnosis = diagnose(ordered, ctx)
     return result

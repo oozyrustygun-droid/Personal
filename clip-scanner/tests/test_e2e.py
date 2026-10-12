@@ -4,8 +4,9 @@ Transcription uses faster-whisper tiny.en when its weights are available (first 
 about 75 MB), otherwise pocketsphinx. Override with CLIP_SCANNER_TEST_ASR=faster-whisper|mlx|pocketsphinx.
 
 Judging uses the offline scripted backend by default, which exercises every stage except the model's
-taste. Set CLIP_SCANNER_LIVE=1 with ANTHROPIC_API_KEY to run the real Opus panel instead (costs a
-few cents); live mode only asserts that a valid report comes out.
+taste. Set CLIP_SCANNER_LIVE=1 to run the real Opus panel instead, on the backend in config.toml
+(claude-code: your Claude subscription; add CLIP_SCANNER_LIVE_BACKEND=api to spend API credits);
+live mode only asserts that a valid report comes out.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from conftest import pick_asr
 
 pytestmark = pytest.mark.e2e
 FIX = Path(__file__).parent / "fixtures" / "sample.mp4"
-LIVE = os.environ.get("CLIP_SCANNER_LIVE") == "1" and bool(os.environ.get("ANTHROPIC_API_KEY"))
+LIVE = os.environ.get("CLIP_SCANNER_LIVE") == "1"
+LIVE_BACKEND = os.environ.get("CLIP_SCANNER_LIVE_BACKEND")  # None: config.toml's judging.backend
 # Scripted stand-in for taste: the payoff lines make a clip great, but a clip that opens on the slow
 # "so anyway chat" wind-up fails the hook gate, as the real panel is instructed to do.
 GREAT_RULES = {"great_phrases": ["oh my god", "never eating", "worst thing"], "great_score": 9.2,
@@ -49,7 +51,10 @@ def env(tmp_path_factory):
 
 
 def run(env, rules: Path, *extra: str) -> dict:
-    judge = [] if LIVE else ["--judge-backend", "scripted", "--scripted-judge", str(rules)]
+    if LIVE:
+        judge = ["--judge-backend", LIVE_BACKEND] if LIVE_BACKEND else []
+    else:
+        judge = ["--judge-backend", "scripted", "--scripted-judge", str(rules)]
     code = main([str(FIX), "--config", str(env["cfg"]), "--yes", *judge, *extra])
     assert code == 0
     reports = list((env["tmp"] / "out").glob("*/report.json"))
@@ -72,7 +77,8 @@ def test_report_and_great_clip(first, env):
     assert first["candidates"] >= 1
     if LIVE:
         assert first["verdict"] in ("NO GREAT CLIPS",) or first["verdict"].endswith(("GREAT CLIP", "GREAT CLIPS"))
-        assert first["cost"]["total_usd"] > 0
+        assert first["cost"]["api_equivalent_usd"] > 0
+        assert (first["cost"]["total_usd"] > 0) == (first["cost"]["billing"] == "api")
         return
     assert first["great_clips"], first["near_misses"]
     # Offline runs are unmistakably labelled and kept out of the real output folder.

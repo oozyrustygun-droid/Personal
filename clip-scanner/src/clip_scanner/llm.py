@@ -1,5 +1,9 @@
 """Claude calls with structured JSON output, request-level caching and cost tracking.
 
+Backends: "claude-code" runs each request through the Claude Code CLI on the user's Claude
+subscription (see claude_code.py); "anthropic" calls the Claude API (billed per token);
+"scripted" is the offline test judge.
+
 Every call:
   * asks for JSON constrained by a schema (`output_config.format`), then validates it again
     client-side with pydantic, because numeric bounds are not enforced by the API;
@@ -26,6 +30,9 @@ from .cache import read_json, write_json
 from .config import Config
 from .cost import CostTracker, Usage, usages_from_response
 
+BACKENDS = ("claude-code", "anthropic", "scripted")
+# Who pays: the Claude subscription (Claude Code), API credits, or nobody (offline test judge).
+BILLING = {"claude-code": "subscription", "anthropic": "api", "scripted": "none"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Models that accept the server-side `fallbacks: "default"` parameter on the Claude API.
 FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
@@ -88,6 +95,8 @@ def _hash_request(payload: dict) -> str:
 class LLM:
     def __init__(self, cfg: Config, store_dir: Path, tracker: CostTracker, *, backend: str = "anthropic",
                  script: ScriptFn | None = None):
+        if backend not in BACKENDS:
+            raise ValueError(f"unknown LLM backend {backend!r}")
         self.cfg = cfg
         self.store_dir = Path(store_dir)
         self.tracker = tracker
@@ -95,7 +104,21 @@ class LLM:
         self.script = script
         self._client = None
         self._lock = threading.Lock()
+        self._cc_exe: str | None = None
+        self._warned: set[str] = set()
         self.refresh = False  # True: ignore cached responses (--rerun judging)
+        # Set by an error that no later request can get past (no login, API billing, plan limit):
+        # every later live request fails at once instead of repeating it.
+        self.fatal: LLMError | None = None
+
+    @property
+    def billing(self) -> str:
+        return BILLING[self.backend]
+
+    def _set_fatal(self, err: LLMError) -> None:
+        with self._lock:
+            if self.fatal is None:
+                self.fatal = err
 
     @property
     def client(self):
@@ -119,7 +142,8 @@ class LLM:
         return None
 
     def use_fallbacks(self, model: str, allow_fallback: bool) -> bool:
-        return allow_fallback and self.cfg.judging.server_fallbacks and model in FALLBACK_MODELS
+        return (self.backend == "anthropic" and allow_fallback and self.cfg.judging.server_fallbacks
+                and model in FALLBACK_MODELS)
 
     def request_hash(self, *, model: str, system: list[dict], messages: list[dict], schema: dict,
                      effort: str, fallbacks: bool = False) -> str:
@@ -152,20 +176,29 @@ class LLM:
                              served_model=served, request_hash=rh,
                              fallback_used=hit.get("fallback_used", not same_model(served, model)))
 
+        if self.fatal is not None:
+            raise LLMError(self.fatal.kind, str(self.fatal).split(": ", 1)[-1])
         if self.backend == "scripted":
             if self.script is None:
                 raise LLMError("config", "scripted backend without a script")
             data = self.script(purpose, meta or {})
             usages = [Usage(model=model)]
             served = model
+            fallback_used = False
+        elif self.backend == "claude-code":
+            data, usages, served, answer_models = self._claude_code(
+                model=model, system=system, messages=messages, schema=schema, effort=effort, max_tokens=max_tokens,
+                purpose=purpose)
+            # Only the models that wrote on the main thread count; Claude Code may bill a helper model.
+            fallback_used = not same_model(served, model) or any(not same_model(m, model) for m in answer_models)
         else:
             data, usages, served = self._anthropic(model=model, system=system, messages=messages, schema=schema,
                                                    effort=effort, max_tokens=max_tokens, purpose=purpose, rh=rh,
                                                    fallbacks=fallbacks)
+            fallback_used = not same_model(served, model) or any(u.model and not same_model(u.model, model)
+                                                                   for u in usages[1:])
         self.tracker.record(purpose, usages, cached=False)
         validated = self._validate(output, data, purpose=purpose, rh=rh, usages=usages)
-        fallback_used = not same_model(served, model) or any(u.model and not same_model(u.model, model)
-                                                               for u in usages[1:])
         write_json(self.store_dir / purpose / f"{rh}.json",
                    {"data": data, "usages": [u.to_json() for u in usages], "served_model": served,
                     "requested_model": model, "fallback_used": fallback_used})
@@ -201,10 +234,16 @@ class LLM:
             else:
                 resp = self.client.messages.create(**kwargs)
         except anthropic.AuthenticationError as e:
-            raise LLMError("auth", "Anthropic credentials missing or invalid (set ANTHROPIC_API_KEY)") from e
+            err = LLMError("auth", "Anthropic credentials missing or invalid (set ANTHROPIC_API_KEY, or use the "
+                                   "default claude-code backend to judge on your Claude subscription)")
+            self._set_fatal(err)
+            raise err from e
         except TypeError as e:  # SDK raises this when no credential source resolves at all
             if "authentication" in str(e).lower():
-                raise LLMError("auth", "no Anthropic credentials found (set ANTHROPIC_API_KEY or `ant auth login`)") from e
+                err = LLMError("auth", "no Anthropic credentials found (set ANTHROPIC_API_KEY, or use the default "
+                                       "claude-code backend to judge on your Claude subscription)")
+                self._set_fatal(err)
+                raise err from e
             raise
         except anthropic.BadRequestError as e:
             raise LLMError("bad_request", str(e)[:500]) from e
@@ -223,6 +262,55 @@ class LLM:
             raise
         except (AttributeError, TypeError, KeyError, ValueError) as e:  # malformed response: fail closed
             raise LLMError("malformed_response", f"{type(e).__name__}: {str(e)[:200]}") from e
+
+    def _claude_exe(self) -> str:
+        """Locate `claude` and confirm it is logged in to a subscription (once per run)."""
+        from . import claude_code as cc
+
+        with self._lock:
+            if self._cc_exe is None:
+                ccfg = self.cfg.judging.claude_code
+                exe = cc.find_claude(ccfg.path)
+                if exe is None:
+                    raise cc.ClaudeCodeError("not_installed", f"Claude Code (`claude`) not found. {cc.INSTALL_HINT}",
+                                             fatal=True)
+                cc.check_subscription(exe, ccfg.allow_api_billing)
+                self._cc_exe = exe
+            return self._cc_exe
+
+    def _claude_code(self, *, model: str, system: list[dict], messages: list[dict], schema: dict, effort: str,
+                     max_tokens: int, purpose: str) -> tuple[dict, list[Usage], str, list[str]]:
+        from . import claude_code as cc
+
+        ccfg = self.cfg.judging.claude_code
+        try:
+            run = cc.run_structured(self._claude_exe(), model=model, system=system, messages=messages, schema=schema,
+                                    effort=effort, max_tokens=max_tokens, timeout=ccfg.timeout_s,
+                                    allow_api_billing=ccfg.allow_api_billing)
+        except cc.ClaudeCodeError as e:
+            err = LLMError(e.kind, str(e))
+            if e.fatal:
+                self._set_fatal(err)
+            raise err from e
+        rl = run.rate_limit
+        if rl.get("isUsingOverage") and not ccfg.allow_extra_usage:
+            # This answer is already paid for and kept; nothing after it runs.
+            self._set_fatal(LLMError("extra_usage", "your Claude plan's included usage ran out and Claude Code "
+                                     "started using paid extra usage, so judging stopped (judging.claude_code."
+                                     "allow_extra_usage = false). Finished judgments are cached; re-run after "
+                                     "your limit resets."))
+        elif rl.get("status") == "allowed_warning":
+            self._warn_once("limit", "Heads up: Claude Code reports you are close to your plan's usage limit.")
+        return run.data, run.usages, run.served_model, run.answer_models
+
+    def _warn_once(self, key: str, text: str) -> None:
+        with self._lock:
+            if key in self._warned:
+                return
+            self._warned.add(key)
+        from .ui import console
+
+        console.print(f"  [yellow]{text}[/yellow]")
 
     def _parse_response(self, resp, model: str, purpose: str, rh: str) -> tuple[dict, list[Usage], str]:
         usages = usages_from_response(resp, model)

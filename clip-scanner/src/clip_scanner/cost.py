@@ -54,31 +54,42 @@ def usages_from_response(resp, requested_model: str) -> list[Usage]:
 
 @dataclass
 class CostTracker:
+    """`usd` is money actually charged per token (API backend only). `api_equivalent_usd` is what the same
+    tokens would cost at API prices; on the Claude subscription it only measures how big the run was."""
+
     cfg: Config
     calls: list[dict] = field(default_factory=list)
+    billing: str = "api"  # api | subscription | none
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(self, purpose: str, usages: list[Usage], cached: bool) -> None:
         with self._lock:
             for u in usages:
+                equiv = 0.0 if cached else u.cost(self.cfg, self.cfg.judging.cache_ttl)
                 self.calls.append({"purpose": purpose, "cached": cached, **u.to_json(),
-                                   "usd": 0.0 if cached else u.cost(self.cfg, self.cfg.judging.cache_ttl)})
+                                   "usd": equiv if self.billing == "api" else 0.0, "api_equivalent_usd": equiv})
 
     def total(self, *, include_cached: bool = False) -> float:
         return sum(c["usd"] for c in self.calls if include_cached or not c["cached"])
 
+    def api_equivalent(self) -> float:
+        return sum(c["api_equivalent_usd"] for c in self.calls if not c["cached"])
+
     def summary(self) -> dict:
         by: dict[str, dict] = {}
         for c in self.calls:
-            b = by.setdefault(c["purpose"], {"calls": 0, "cached_calls": 0, "usd": 0.0, "input_tokens": 0,
-                                             "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0})
+            b = by.setdefault(c["purpose"], {"calls": 0, "cached_calls": 0, "usd": 0.0, "api_equivalent_usd": 0.0,
+                                             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                                             "cache_write_tokens": 0})
             b["calls"] += 1
             b["cached_calls"] += int(c["cached"])
             b["usd"] += c["usd"]
+            b["api_equivalent_usd"] += c["api_equivalent_usd"]
             if not c["cached"]:
                 for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
                     b[k] += c[k]
-        return {"total_usd": round(self.total(), 4), "by_purpose": by}
+        return {"total_usd": round(self.total(), 4), "api_equivalent_usd": round(self.api_equivalent(), 4),
+                "billing": self.billing, "by_purpose": by}
 
 
 def estimate_tokens(text: str) -> int:

@@ -21,6 +21,7 @@ import numpy as np
 
 from .cache import fingerprint, write_json
 from .candidates import Candidate
+from .cli_common import resolve_backend
 from .config import REPO_ROOT, Config, load_config
 from .judging.gates import GateResult
 from .judging.panel import Decision, JudgeOutcome, decide
@@ -230,9 +231,15 @@ def run_calibrate(args: argparse.Namespace) -> int:
     calls_per_clip = len(cfg.judging.judges) + (2 if cfg.devils_advocate.enabled else 0)
     price = cfg.price(cfg.judging.model)
     est = len(analyses) * calls_per_clip * (8000 * price.input + 4000 * price.output) / 1e6
-    console.print(f"Judging {len(analyses)} clips with the full panel: up to {len(analyses) * calls_per_clip} calls, "
-                  f"estimated {fmt_usd(est)} (cached clips are free).")
-    if est > cfg.judging.confirm_above_usd and not args.yes:
+    backend = resolve_backend(cfg, args.judge_backend)
+    subscription = backend == "claude-code"
+    if subscription:
+        console.print(f"Judging {len(analyses)} clips with the full panel: up to {len(analyses) * calls_per_clip} "
+                      f"calls on your Claude plan through Claude Code (no API charges; cached clips are free).")
+    else:
+        console.print(f"Judging {len(analyses)} clips with the full panel: up to {len(analyses) * calls_per_clip} "
+                      f"calls, estimated {fmt_usd(est)} (cached clips are free).")
+    if not subscription and est > cfg.judging.confirm_above_usd and not args.yes:
         if console.input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
             return 1
 
@@ -288,16 +295,19 @@ def run_calibrate(args: argparse.Namespace) -> int:
         console.print(f"[red]{sw['note']}[/red]")
 
     out_dir = manifest.parent / "results" / time.strftime("%Y%m%d-%H%M%S")
-    write_json(out_dir / "calibration.json", {"judge_backend": args.judge_backend, "informative": informative,
+    for msg in sorted({str(a.llm.fatal).split(": ", 1)[-1] for _, a in analyses if a.llm.fatal is not None}):
+        console.print(f"[yellow]Judging stopped early: {msg}[/yellow]")
+    write_json(out_dir / "calibration.json", {"judge_backend": backend, "informative": informative,
                                               "current": current, "recommended": rec, "note": sw["note"],
                                               "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})
-    console.print(f"[dim]details: {out_dir / 'calibration.json'} · API cost this run {fmt_usd(total_cost)}[/dim]")
+    spent = "no API charges (Claude plan)" if subscription else f"API cost this run {fmt_usd(total_cost)}"
+    console.print(f"[dim]details: {out_dir / 'calibration.json'} · {spent}[/dim]")
     if rec:
         loose = loosened(rec, cfg)
         if loose:
             console.print(f"[yellow]Note: this would LOOSEN the bar: {'; '.join(loose)}[/yellow]")
     if args.write_config:
-        refusal = write_guard(rec, cfg, informative["hit"], informative["flop"], args.judge_backend == "scripted",
+        refusal = write_guard(rec, cfg, informative["hit"], informative["flop"], backend == "scripted",
                               args.allow_loosen)
         if refusal:
             console.print(f"[red]Not writing config.toml: {refusal}.[/red]")

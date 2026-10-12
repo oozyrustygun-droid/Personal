@@ -130,7 +130,18 @@ class GatesCfg(_Section):
         return self
 
 
+class ClaudeCodeCfg(_Section):
+    path: str = ""                    # blank: find `claude` on PATH
+    timeout_s: float = Field(900.0, gt=0)
+    allow_extra_usage: bool = False   # False: stop judging as soon as Claude Code draws on paid extra usage
+    allow_api_billing: bool = False   # False: refuse to run if Claude Code would bill an API key
+
+
 class JudgingCfg(_Section):
+    # claude-code: every call runs through the Claude Code CLI on your Claude subscription (no API credits).
+    # api: the Claude API with ANTHROPIC_API_KEY, billed per token.
+    backend: Literal["claude-code", "api"] = "claude-code"
+    claude_code: ClaudeCodeCfg = ClaudeCodeCfg()
     model: str = "claude-opus-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     judges: list[str] = ["jaded_scroller", "joe_superfan", "shorts_editor"]
@@ -145,7 +156,7 @@ class JudgingCfg(_Section):
     context_window_s: float = 20.0
     max_output_tokens: int = 16000
     confirm_above_usd: float = 5.0
-    server_fallbacks: bool = True   # only for packaging/diagnosis/proposer; never for verdicts
+    server_fallbacks: bool = True   # api backend only; packaging/diagnosis/proposer; never for verdicts
     cache_ttl: Literal["5m", "1h"] = "5m"
     criterion_floors: dict[str, float] = dict(DEFAULT_FLOORS)
     weights: dict[str, float] = {

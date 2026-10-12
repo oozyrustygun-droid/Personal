@@ -13,14 +13,15 @@ What a run prints, in shape (numbers depend on the video):
 ```
 ▸ Ingest  ▸ Transcribe  ▸ Signals  ▸ Candidates  ▸ Keyframes
 ▸ Judging
-  N/M candidates passed the deterministic gates; K need judging with claude-opus-5-5 (effort high).
-  Cost estimate: ~$X expected (worst case $Y …)       ← asks before spending above $5
+  judging on your Claude subscription, through Claude Code (no API credits)
+  N/M candidates passed the deterministic gates; K need judging with claude-opus-5-5 (effort high) through Claude Code.
+  Runs on your Claude plan: no API charges. About N model calls expected, M at most …
   c07 rejected  jaded_scroller: gate 'standalone' failed …
   c12 GREAT
 ╭── clip-scanner · <video title> ──╮
 │ 1 GREAT CLIP   (or: NO GREAT CLIPS + one-line read) │
 ╰─────────────────────────────────────────────────────╯
-Actual API cost this run: $Z
+Ran on your Claude plan through Claude Code: $0 in API charges …
 ```
 
 ## Setup (M-series Mac)
@@ -29,9 +30,30 @@ Actual API cost this run: $Z
 brew install ffmpeg uv
 cd ~/clip-scanner
 uv sync                                  # Python 3.12 + all deps (mlx-whisper on Apple Silicon)
-export ANTHROPIC_API_KEY=sk-ant-...      # or: ant auth login
-uv run clip-scanner doctor               # checks ffmpeg/libass, credentials, backends
+claude                                   # Claude Code: log in once with your Claude account (/login), then exit
+uv run clip-scanner doctor               # checks ffmpeg/libass, the Claude Code login, backends
 ```
+
+**Judging runs on your Claude subscription by default.** Every Claude call (the judges, the devil's
+advocate, the arbiter, the captions, the transcript proposer) goes through the Claude Code CLI
+(`claude -p`) that you are logged in to, so it uses your plan's usage instead of API credits. You need
+[Claude Code](https://claude.com/claude-code) installed and logged in with a Pro/Max (or Team/Enterprise)
+account. The scanner protects you from paying by accident:
+
+- It hides `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` from Claude Code (in this mode Claude Code would
+  otherwise bill a key that happens to be set in your shell).
+- It refuses to run if Claude Code is logged in with an API key or a cloud account rather than your
+  Claude subscription, and kills any request that reports an API key as its source.
+- If your plan's usage limit is reached, the scan stops and says when the limit resets. If you have
+  paid "extra usage" turned on, it stops as soon as Claude Code starts using it
+  (`[judging.claude_code] allow_extra_usage = false`). Judged clips are cached, so re-running after the
+  reset continues where it stopped.
+
+The judges run with every Claude Code tool switched off and none of your CLAUDE.md, memory, MCP
+servers, plugins, hooks or settings files loaded: they see only the clip and the judging handbook.
+
+To use the paid Claude API instead, set `[judging] backend = "api"` (or pass `--judge-backend api`) and
+`export ANTHROPIC_API_KEY=sk-ant-...`.
 
 Linux also needs `apt install ffmpeg libegl1 libgles2` (MediaPipe's native library links EGL).
 Optional speaker diarization: `uv sync --extra diarize` plus a Hugging Face token in `HF_TOKEN` that
@@ -45,8 +67,9 @@ uv run clip-scanner ui
 
 This opens `http://127.0.0.1:8765` in your browser. Paste or drop one or more YouTube/TikTok links (or the
 full path of a local video) and press **Scan**. Each scan shows its stages live (Ingest → Transcribe → Signals
-→ Candidates → Keyframes → Judging → Export). If the cost estimate is above your limit
-(`confirm_above_usd`), the scan pauses for you to click **Approve & judge** or **Cancel**. When it finishes
+→ Candidates → Keyframes → Judging → Export). On your Claude subscription it just runs. With the paid API
+backend, if the cost estimate is above your limit (`confirm_above_usd`), the scan pauses for you to click
+**Approve & judge** or **Cancel**. When it finishes
 you get the verdict, playable vertical clips, one-click copy for the caption, posting hook and hashtags,
 download buttons (vertical and raw cut), and a link that opens the source video at the clip's timestamp.
 With no GREAT clips you get the near-misses and exactly what killed each one. **Past reports** lists every
@@ -64,14 +87,15 @@ uv run clip-scanner <youtube/tiktok URL or file> [--max-clips 5] [--no-cut] [--e
 uv run clip-scanner "https://www.youtube.com/watch?v=…"            # full scan + exports
 uv run clip-scanner ~/Downloads/stream.mp4 --no-cut                  # report only
 uv run clip-scanner URL --explain-rejects                            # list every rejected candidate + reason
-uv run clip-scanner URL --dry-run                                    # stop at the cost estimate
+uv run clip-scanner URL --dry-run                                    # stop at the usage/cost estimate
+uv run clip-scanner URL --judge-backend api                          # paid Claude API instead of your plan
 uv run clip-scanner URL --rerun judging                              # ignore cached verdicts
 uv run clip-scanner calibrate --fetch                                # measure + tune the judges (see below)
 ```
 
 Every stage is cached per video under `~/.cache/clip-scanner/<video-id>/`. Re-running the same
-video skips download, transcription, signals and any judge call it has already paid for. Changing a
-threshold in `config.toml` re-applies the rule to the cached verdicts for $0.
+video skips download, transcription, signals and any judge call it has already made. Changing a
+threshold in `config.toml` re-applies the rule to the cached verdicts without calling Claude again.
 
 ### Output
 
@@ -133,12 +157,22 @@ All in `config.toml`, no code changes needed:
 | `[devils_advocate] min_survival_confidence` | 7.0 | arbiter confidence needed to survive |
 | `[gates] max_dead_air_s`, `min_len_s`, `max_len_s` | 1.5 / 12 / 60 | deterministic gates |
 | `[candidates] max_candidates` | 40 | recall breadth (and cost) |
-| `[judging] effort` / `model` | high / claude-opus-5-5 | quality vs. cost |
+| `[judging] effort` / `model` | high / claude-opus-5-5 | quality vs. usage/cost |
+| `[judging] backend` | `claude-code` | `claude-code` = your Claude subscription; `api` = API credits |
 
-## Cost
+## Cost and usage
 
-The tool prints an estimate before judging and asks for confirmation above `confirm_above_usd`
-($5 by default; `--yes` skips the prompt). It prints the actual spend afterwards. Opus 5.5 costs $4 per million
+**On your Claude subscription (default)** there are no API charges. Each scan counts toward your plan's
+usage limits like any other Claude Code work. Before judging, the tool prints how many model calls to
+expect. For a 1-hour video that is typically a few dozen Opus calls, each reading one clip's transcript and
+seven keyframes. On Max plans that is a modest slice of a usage window. On Pro, a long video can use a
+large share of it or hit the limit; the scan then stops cleanly and resumes from the cache after the
+reset. `effort = "medium"` stretches your usage further, at some cost to judging depth. The report shows
+the token totals and what the same run would have cost at API prices, only as a size guide.
+
+**On the paid API** (`backend = "api"`) the tool prints a dollar estimate before judging and asks for
+confirmation above `confirm_above_usd` ($5 by default; `--yes` skips the prompt). It prints the actual
+spend afterwards. Opus 5.5 costs $4 per million
 input tokens and $20 per million output. Thinking output dominates, so `effort` is the main lever.
 Short-circuiting means most candidates cost one judge call: under unanimity the first rejection
 settles it (property-tested to give identical outcomes). For a 1-hour video with 40 candidates, the
@@ -168,13 +202,16 @@ See [`calibration/README.md`](calibration/README.md).
 
 ```bash
 uv run pytest                     # unit tests + end-to-end run on tests/fixtures/sample.mp4
-CLIP_SCANNER_LIVE=1 uv run pytest tests/test_e2e.py   # same, with the real Opus panel (few cents)
+CLIP_SCANNER_LIVE=1 uv run pytest tests/test_e2e.py   # same, with the real Opus panel (your Claude plan)
+CLIP_SCANNER_LIVE_CC=1 uv run pytest tests/test_claude_code.py -k live   # one tiny real Claude Code call
 ```
 
 The unit tests cover boundary snapping (including randomized never-mid-word / never-before-payoff
 invariants), the deterministic gates, the consensus rule (every way a merely-good clip could slip
 through, plus short-circuit equivalence), the devil's-advocate rule, calibration sweeps, captions,
-crop smoothing, and the real Anthropic request and response path against a local mock server.
+crop smoothing, the real Anthropic request and response path against a local mock server, and the
+Claude Code path against a fake `claude` program (API keys never reach it, every login/billing/limit
+problem stops the run, a different model's answer never counts).
 The end-to-end test runs the whole CLI on a 40-second synthetic stream: TTS speech, a stand-in face
 (a public-domain NASA portrait) panning across the frame, and two scene cuts. It checks the report,
 gates, boundaries, the 1080×1920 export (face stays centered, audio present), the raw cut,

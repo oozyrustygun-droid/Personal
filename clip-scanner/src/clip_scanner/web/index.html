@@ -231,6 +231,10 @@ function jobCard(j) {
     extra += `<div class="hint">Judged ${j.judging.done} of ${j.judging.eligible} candidates that passed the measured gates
       (${j.judging.total} proposed) · <b>${j.judging.great}</b> GREAT so far</div>`;
   }
+  if (j.estimate && j.estimate.billing === "subscription" && j.estimate.uncached > 0 && j.status === "running") {
+    const e = j.estimate;
+    extra += `<div class="hint">Judging on your Claude plan through Claude Code: no API charges · about ${e.expected_calls} model call${e.expected_calls === 1 ? "" : "s"} (at most ${e.worst_case_calls}), counted toward your plan's usage limits</div>`;
+  }
   if (j.status === "awaiting_approval" && j.estimate) {
     const e = j.estimate;
     extra += `<div class="approve"><div>Judging ${e.uncached} candidate${e.uncached === 1 ? "" : "s"} with ${esc(e.model)} (effort ${esc(e.effort)})</div>
@@ -240,6 +244,9 @@ function jobCard(j) {
   if (j.status === "done" && j.report_dir) {
     extra += `<div class="row"><button class="primary small" data-open="${esc(j.report_dir)}">View results</button>
       ${j.result_status === "unavailable" ? '<span class="hint">Judging did not run; previous results were kept.</span>' : ""}</div>`;
+  }
+  if (j.status === "done" && (j.notes || []).length) {
+    extra += j.notes.map((n) => `<div class="err">${esc(n)}</div>`).join("");
   }
   if (j.status === "failed") extra += `<div class="err">${esc(j.error)}</div>`;
   const cancelQueued = j.status === "queued" ? `<button class="small danger" data-cancel="${j.id}">Remove</button>` : "";
@@ -373,7 +380,14 @@ async function openReport(dir) {
       <div class="tablewrap"><table><thead><tr><th>Window</th><th>Length</th><th>Killed at</th><th>Reason</th></tr></thead>
       <tbody>${rejectRows(rep.rejected)}</tbody></table></div></details>`;
   }
-  if (rep.cost) html += `<p class="hint">API cost of the last run: <b>${usd(rep.cost.total_usd)}</b> (cached calls are free)${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}</p>`;
+  if (rep.cost) {
+    const c = rep.cost;
+    const line = c.billing === "subscription"
+      ? `Ran on your Claude plan through Claude Code: <b>$0 in API charges</b> (same tokens at API prices: ${usd(c.api_equivalent_usd || 0)})`
+      : c.billing === "none" ? "Scripted test judge: nothing spent"
+      : `API cost of the last run: <b>${usd(c.total_usd)}</b> (cached calls are free)`;
+    html += `<p class="hint">${line}${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}</p>`;
+  }
   $("results").innerHTML = html;
   $("results-wrap").hidden = false;
   $("results-wrap").scrollIntoView({ behavior: "smooth", block: "start" });

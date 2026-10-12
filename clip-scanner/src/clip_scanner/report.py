@@ -30,14 +30,14 @@ def out_dir_for(meta, cfg: Config, scripted: bool = False) -> Path:
     return cfg.output_dir / f"{slug(meta.title, 50)}-{meta.video_id[-10:]}{suffix}"
 
 
-def write_in_progress(meta, cfg: Config, out: Path, scripted: bool = False) -> None:
+def write_in_progress(meta, cfg: Config, out: Path, scripted: bool = False, backend: str = "") -> None:
     """Placeholder written before judging, so an interrupted run never leaves an old verdict looking current."""
     out.mkdir(parents=True, exist_ok=True)
     msg = ("IN PROGRESS: a scan of this video started and has not finished. If you are reading this, it "
            "was interrupted or crashed; earlier results are invalid until a run completes.")
     write_json(out / "report.json", {"status": "in_progress", "verdict": "IN PROGRESS / INTERRUPTED",
                                      "video": {"id": meta.video_id, "title": meta.title},
-                                     "judge_backend": "scripted" if scripted else "anthropic",
+                                     "judge_backend": "scripted" if scripted else backend,
                                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
     (out / "report.md").write_text(f"# clip-scanner report: {meta.title}\n\n**{msg}**\n", encoding="utf-8")
 
@@ -120,7 +120,7 @@ def build_report(a, result, cfg: Config, exported: dict | None = None, scripted:
                   "uploader": a.meta.uploader, "duration": round(a.meta.duration, 1)},
         "verdict": verdict_label(result, scripted),
         "status": result.status,
-        "judge_backend": "scripted" if scripted else "anthropic",
+        "judge_backend": "scripted" if scripted else a.llm.backend,
         "bar": {"judges": j.judges, "model": j.model, "effort": j.effort, "overall_min": j.overall_min,
                 "rubric_mean_min": j.rubric_mean_min, "criterion_floors": j.criterion_floors,
                 "gate_policy": j.gate_policy, "devils_advocate": cfg.devils_advocate.enabled,
@@ -190,10 +190,23 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
                      f"{STAGE_LABEL.get(r['killed_at'], r['killed_at'])} | {_md('; '.join(r['reasons']))} |")
         L.append("")
     cost = rep["cost"]
-    L += ["## Cost", "", f"Actual API spend this run: **{fmt_usd(cost['total_usd'])}** (cached calls are free).", ""]
+    L += ["## Cost", "", cost_line(cost, markdown=True), ""]
+    subscription = cost.get("billing") == "subscription"
     for purpose, s in cost["by_purpose"].items():
-        L.append(f"- {purpose}: {s['calls']} call(s), {s['cached_calls']} cached, {fmt_usd(s['usd'])}")
+        size = (f"{s.get('input_tokens', 0) + s.get('cache_read_tokens', 0) + s.get('cache_write_tokens', 0):,} in / "
+                f"{s.get('output_tokens', 0):,} out tokens" if subscription else fmt_usd(s["usd"]))
+        L.append(f"- {purpose}: {s['calls']} call(s), {s['cached_calls']} cached, {size}")
     return "\n".join(L) + "\n"
+
+
+def cost_line(cost: dict, markdown: bool = False) -> str:
+    b = (lambda t: f"**{t}**") if markdown else (lambda t: f"[bold]{t}[/bold]")
+    if cost.get("billing") == "subscription":
+        return (f"Ran on your Claude plan through Claude Code: {b('$0 in API charges')} (counts toward your plan's "
+                f"usage limits; the same tokens at API prices would be {fmt_usd(cost.get('api_equivalent_usd', 0))}).")
+    if cost.get("billing") == "none":
+        return "Scripted test judge: no model calls, nothing spent."
+    return f"Actual API spend this run: {b(fmt_usd(cost['total_usd']))} (cached calls are free)."
 
 
 def _md(text: str) -> str:
@@ -244,5 +257,5 @@ def print_report(a, result, cfg: Config, paths: dict, *, explain_rejects: bool =
             t.add_row(r["id"], f"{r['start_ts']}–{r['end_ts']}", f"{r['duration']:.1f}s",
                       STAGE_LABEL.get(r["killed_at"], r["killed_at"]), "; ".join(r["reasons"]))
         console.print(t)
-    console.print(f"Actual API cost this run: [bold]{fmt_usd(rep['cost']['total_usd'])}[/bold]")
+    console.print(cost_line(rep["cost"]))
     console.print(f"[dim]report: {paths['md']}\njson:   {paths['json']}[/dim]")

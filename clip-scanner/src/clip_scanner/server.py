@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from . import ui
+from .cli_common import BACKEND_LABEL, JUDGE_BACKENDS, resolve_backend
 from .config import load_config
 from .ui import console
 
@@ -51,6 +52,7 @@ class Job:
         self.judging = {"total": 0, "eligible": 0, "done": 0, "great": 0}
         self.out_dir: str | None = None
         self.result_status = ""
+        self.notes: list[str] = []
         self.error = ""
         self.created = time.time()
         self.started: float | None = None
@@ -63,7 +65,7 @@ class Job:
                 "current": self.current, "stages": [{"name": k, **v} for k, v in self.stages.items()],
                 "log": list(self.log)[-80:], "estimate": self.estimate, "judging": self.judging,
                 "report_dir": Path(self.out_dir).name if self.out_dir else None,
-                "result_status": self.result_status, "error": self.error, "max_clips": self.max_clips,
+                "result_status": self.result_status, "notes": self.notes, "error": self.error, "max_clips": self.max_clips,
                 "cut": self.cut, "created": self.created, "started": self.started, "finished": self.finished}
 
     # -- events from the pipeline ------------------------------------------------------------------
@@ -111,7 +113,7 @@ class _LogWriter:
 class Scanner:
     """Runs queued jobs one at a time on a background thread."""
 
-    def __init__(self, config_path: str | None, judge_backend: str = "anthropic", scripted_judge: str | None = None):
+    def __init__(self, config_path: str | None, judge_backend: str | None = None, scripted_judge: str | None = None):
         self.config_path = config_path
         self.judge_backend = judge_backend
         self.scripted_judge = scripted_judge
@@ -162,6 +164,7 @@ class Scanner:
             self._run(job)
 
     def _run(self, job: Job) -> None:
+        from .judging.runner import needs_approval
         from .pipeline import run_scan
 
         job.status, job.started = "running", time.time()
@@ -170,7 +173,7 @@ class Scanner:
         ui.listeners.append(job.on_event)
 
         def confirm(est: dict, cfg) -> bool:
-            if est["uncached"] == 0 or est["expected_usd"] <= cfg.judging.confirm_above_usd:
+            if not needs_approval(est, cfg):
                 return True
             job.status = "awaiting_approval"
             job._decision.wait()
@@ -184,6 +187,7 @@ class Scanner:
             res = run_scan(args, confirm)
             job.out_dir = str(res.get("out_dir")) if res.get("out_dir") else None
             job.result_status = res.get("status", "")
+            job.notes = list(res.get("notes") or [])
             if job.status != "cancelled":
                 job.status = "done"
         except Exception as e:  # show the failure in the UI instead of killing the worker
@@ -416,7 +420,7 @@ def parse_sources(text: str) -> list[str]:
 
 
 def serve(config_path: str | None = None, port: int = 8765, open_browser: bool = True,
-          judge_backend: str = "anthropic", scripted_judge: str | None = None) -> tuple[ThreadingHTTPServer, str]:
+          judge_backend: str | None = None, scripted_judge: str | None = None) -> tuple[ThreadingHTTPServer, str]:
     cfg = load_config(config_path)
     output_dir = cfg.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -444,13 +448,14 @@ def run_ui(argv: list[str]) -> int:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     p.add_argument("--config", help="path to config.toml")
-    p.add_argument("--judge-backend", choices=["anthropic", "scripted"], default="anthropic", help=argparse.SUPPRESS)
+    p.add_argument("--judge-backend", choices=JUDGE_BACKENDS, default=None, metavar="{claude-code,api}",
+                   help="claude-code = your Claude subscription (default, from config.toml); api = ANTHROPIC_API_KEY")
     p.add_argument("--scripted-judge", help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     httpd, url = serve(args.config, args.port, not args.no_browser, args.judge_backend, args.scripted_judge)
     console.print(f"[bold green]clip-scanner UI running at {url}[/bold green]  (Ctrl-C to stop)")
-    if args.judge_backend == "scripted":
-        console.print("[yellow]Scripted test judge: verdicts are NOT real.[/yellow]")
+    backend = resolve_backend(load_config(args.config), args.judge_backend)
+    console.print(f"Judging runs on {BACKEND_LABEL.get(backend, backend)}.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

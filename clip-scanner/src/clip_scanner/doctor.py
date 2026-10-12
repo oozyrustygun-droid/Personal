@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 
+from .cli_common import BACKEND_LABEL, resolve_backend
+from .config import load_config
 from .ui import console
 
 
@@ -16,6 +18,21 @@ def _ok(flag: bool, label: str, detail: str = "") -> bool:
     mark = "[green]✓[/green]" if flag else "[red]✗[/red]"
     console.print(f"  {mark} {label}" + (f" [dim]{detail}[/dim]" if detail else ""))
     return flag
+
+
+def _check_claude_code(cfg) -> bool:
+    from . import claude_code as cc
+
+    exe = cc.find_claude(cfg.judging.claude_code.path if cfg else "")
+    if not _ok(bool(exe), "Claude Code CLI (`claude`)", exe or cc.INSTALL_HINT):
+        return False
+    _ok(True, "Claude Code version", cc.version(exe) or "unknown")
+    try:
+        st = cc.check_subscription(exe, cfg.judging.claude_code.allow_api_billing if cfg else False)
+    except cc.ClaudeCodeError as e:
+        return _ok(False, "Claude Code logged in to your Claude subscription", str(e))
+    return _ok(True, "Claude Code logged in to your Claude subscription",
+               f"{st.get('authMethod')}; judging uses your plan's usage, not API credits")
 
 
 def run_doctor(argv: list[str]) -> int:
@@ -30,11 +47,24 @@ def run_doctor(argv: list[str]) -> int:
         _ok(" sendcmd " in filters, "ffmpeg sendcmd filter (face-tracked crop)")
     good &= _ok(bool(shutil.which("ffprobe")), "ffprobe on PATH")
 
+    try:
+        cfg = load_config()
+    except Exception as e:  # noqa: BLE001 - report it, keep checking the rest
+        good &= _ok(False, "config.toml", str(e)[:200])
+        cfg = None
+    backend = resolve_backend(cfg, None) if cfg else "claude-code"
+    console.print(f"  [dim]judging backend: {BACKEND_LABEL.get(backend, backend)}[/dim]")
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    ant = shutil.which("ant")
-    _ok(has_key or bool(ant), "Anthropic credentials",
-        "ANTHROPIC_API_KEY set" if has_key else ("`ant auth status` to check profile" if ant else
-                                                  "export ANTHROPIC_API_KEY=... (needed for judging)"))
+    if backend == "claude-code":
+        good &= _check_claude_code(cfg)
+        if has_key:
+            console.print("  [dim]ANTHROPIC_API_KEY is set in this shell; clip-scanner hides it from Claude Code so "
+                          "judging uses your subscription, not API credits.[/dim]")
+    else:
+        ant = shutil.which("ant")
+        good &= _ok(has_key or bool(ant), "Anthropic API credentials (billed per token)",
+                    "ANTHROPIC_API_KEY set" if has_key else ("`ant auth status` to check profile" if ant else
+                                                              "export ANTHROPIC_API_KEY=... (needed for judging)"))
 
     backends = []
     if importlib.util.find_spec("mlx_whisper"):
