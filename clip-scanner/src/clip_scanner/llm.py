@@ -88,6 +88,7 @@ class LLM:
         self.script = script
         self._client = None
         self._lock = threading.Lock()
+        self.refresh = False  # True: ignore cached responses (--rerun judging)
 
     @property
     def client(self):
@@ -121,7 +122,7 @@ class LLM:
         rh = self.request_hash(model=model, system=system, messages=messages, schema=schema, effort=effort)
         if self.backend == "scripted":
             rh = _hash_request({"scripted": meta or {}, "purpose": purpose, "h": rh})
-        hit = self.cached_result(purpose, rh)
+        hit = None if self.refresh else self.cached_result(purpose, rh)
         if hit is not None:
             usages = [Usage.from_json(u) for u in hit.get("usages", [])]
             self.tracker.record(purpose, usages, cached=True)
