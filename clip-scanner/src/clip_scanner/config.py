@@ -166,6 +166,8 @@ class ExportCfg(_Section):
     crf: int = 18
     preset: str = "medium"
     audio_bitrate: str = "192k"
+    raw_copy: bool = True
+    raw_handles_s: float = 3.0
 
 
 class CaptionsCfg(_Section):

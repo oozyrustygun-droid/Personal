@@ -121,6 +121,12 @@ def test_export_is_vertical_with_audio_and_tracks_face(first, env):
     dur = float(info["format"]["duration"])
     assert abs(dur - first["great_clips"][0]["duration"]) <= 0.45  # + pre-roll at most
 
+    raw = Path(first["great_clips"][0]["raw_file"])  # untouched landscape cut with handles, for editing
+    rv = next(s for s in ffprobe(raw)["streams"] if s["codec_type"] == "video")
+    assert (rv["width"], rv["height"]) == (1280, 720)
+    t_in, t_out = first["great_clips"][0]["raw_clip_in_out"]
+    assert 0 < t_in < t_out <= float(ffprobe(raw)["format"]["duration"]) + 0.05
+
     from clip_scanner.config import load_config
     from clip_scanner.facetrack import detect_faces
     from clip_scanner.media import read_frames

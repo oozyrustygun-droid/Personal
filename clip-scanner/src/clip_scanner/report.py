@@ -67,7 +67,9 @@ def _clip_json(rank, d, c, pkg, exported) -> dict:
         "devils_advocate": (d.devil or {}).get("strongest_flop_argument", ""),
         "arbiter": {k: (d.arbiter or {}).get(k) for k in ("survival_confidence", "decisive_issue", "analysis")},
         "gates": d.deterministic,
-        "file": exported.get(c.id),
+        "file": (exported.get(c.id) or {}).get("vertical"),
+        "raw_file": (exported.get(c.id) or {}).get("raw"),
+        "raw_clip_in_out": [(exported.get(c.id) or {}).get("raw_in"), (exported.get(c.id) or {}).get("raw_out")],
     }
 
 
@@ -140,7 +142,10 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
               f"- **Panel (effective scores):** {judges}",
               f"- **Devil's advocate:** {c['devils_advocate'] or 'n/a'}",
               f"- **Arbiter:** survived (confidence {arb.get('survival_confidence')}): {arb.get('decisive_issue') or ''}",
-              f"- **File:** {c['file'] or '(not exported)'}", ""]
+              f"- **File (vertical, captioned):** {c['file'] or '(not exported)'}",
+              f"- **Raw landscape cut for editing:** {c['raw_file'] or '(not exported)'}"
+              + (f" (clip runs {c['raw_clip_in_out'][0]:.1f}s → {c['raw_clip_in_out'][1]:.1f}s inside it)"
+                 if c['raw_file'] and c['raw_clip_in_out'][0] is not None else ""), ""]
     if not rep["great_clips"] and rep["near_misses"]:
         L += ["## Top near-misses (and exactly what killed them)", "",
               "| # | Window | Length | Killed at | Decisive reason |", "|---|---|---|---|---|"]
@@ -191,7 +196,8 @@ def print_report(a, result, cfg: Config, paths: dict, *, explain_rejects: bool =
         for c in rep["great_clips"]:
             t.add_row(str(c["rank"]), f"{c['start_ts']}–{c['end_ts']}", f"{c['duration']:.1f}s", f"{c['score']:.1f}",
                       f"[bold]{c['caption_title']}[/bold]\nHook: {c['hook_line']}\nWhy: {c['why_viral']}\n"
-                      f"Post: {c['posting_hook_text']}" + (f"\n[dim]{c['file']}[/dim]" if c["file"] else ""))
+                      f"Post: {c['posting_hook_text']}" + (f"\n[dim]{c['file']}[/dim]" if c["file"] else "")
+                      + (f"\n[dim]raw: {c['raw_file']}[/dim]" if c.get("raw_file") else ""))
         console.print(t)
     elif rep["near_misses"]:
         t = Table(title="Top near-misses", show_lines=True)

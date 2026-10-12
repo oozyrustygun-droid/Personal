@@ -109,14 +109,37 @@ def slug(text: str, n: int = 40) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:n] or "clip"
 
 
-def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict) -> Path:
+def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict, raw: bool = False) -> Path:
     title = packaging.get(cand_id, {}).get("caption_title", "") or cand_id
-    return out_dir / "clips" / f"{rank:02d}-{slug(title)}-{cand_id}.mp4"
+    return out_dir / "clips" / f"{rank:02d}-{slug(title)}-{cand_id}{'-raw' if raw else ''}.mp4"
 
 
-def render_fingerprint(a, cand, cfg: Config) -> str:
-    return fingerprint("render", a.meta.video_id, [list(s) for s in cand.segments],
+def render_fingerprint(a, cand, cfg: Config, kind: str = "vertical") -> str:
+    return fingerprint("render", kind, a.meta.video_id, [list(s) for s in cand.segments],
                        cfg.section_hash("export", "captions"))
+
+
+def raw_window(a, cand, cfg: Config) -> tuple[float, float]:
+    """Contiguous landscape source span with editing handles on both sides (jump cuts not applied)."""
+    h = cfg.export.raw_handles_s
+    return max(0.0, cand.start - h), min(a.meta.duration, cand.end + h)
+
+
+def render_raw(a, cand, out_path: Path, cfg: Config) -> Path:
+    """Untouched original framing and audio, no captions: footage for re-editing by hand."""
+    s, e = raw_window(a, cand, cfg)
+    tmp = out_path.with_suffix(".tmp.mp4")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    p = subprocess.run(["ffmpeg", "-y", "-v", "error", *hwaccel_args(cfg.signals.hwaccel), "-ss", f"{s:.3f}",
+                        "-t", f"{e - s:.3f}", "-i", str(a.meta.path), "-map", "0:v:0", "-map", "0:a:0",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(cfg.export.crf), "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", cfg.export.audio_bitrate, "-movflags", "+faststart", str(tmp)],
+                       capture_output=True)
+    if p.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg raw export failed:\n{p.stderr.decode(errors='replace')[-2000:]}")
+    tmp.replace(out_path)
+    return out_path
 
 
 def prune_stale_clips(out_dir: Path, keep: set[str]) -> list[Path]:
@@ -131,23 +154,47 @@ def prune_stale_clips(out_dir: Path, keep: set[str]) -> list[Path]:
     return removed
 
 
-def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> dict[str, str]:
+def expected_files(out_dir: Path, result, cfg: Config) -> set[str]:
+    keep = set()
+    for rank, d in enumerate(result.great, 1):
+        keep.add(str(clip_path(out_dir, rank, d.candidate_id, result.packaging)))
+        if cfg.export.raw_copy:
+            keep.add(str(clip_path(out_dir, rank, d.candidate_id, result.packaging, raw=True)))
+    return keep
+
+
+def _render_cached(path: Path, fp: str, render, meta: dict, force: bool) -> bool:
+    sidecar = path.with_suffix(".json")
+    if path.exists() and not force and sidecar.exists() and read_json(sidecar).get("fingerprint") == fp:
+        return True
+    render()
+    write_json(sidecar, {"fingerprint": fp, **meta})
+    console.print(f"  [green]✓[/green] {path}")
+    return True
+
+
+def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> dict[str, dict]:
+    """Render each GREAT clip. Returns {candidate_id: {"vertical", "raw", "raw_in", "raw_out"}}."""
     by_id = {c.id: c for c in a.candidates}
-    exported: dict[str, str] = {}
+    exported: dict[str, dict] = {}
     for rank, d in enumerate(result.great, 1):
         c = by_id[d.candidate_id]
+        info: dict = {"vertical": None, "raw": None}
+        meta = {"segments": [list(s) for s in c.segments], "source": a.meta.source, "candidate": c.id}
         path = clip_path(out_dir, rank, c.id, result.packaging)
-        sidecar = path.with_suffix(".json")
-        fp = render_fingerprint(a, c, cfg)
-        if path.exists() and not force and sidecar.exists() and read_json(sidecar).get("fingerprint") == fp:
-            exported[c.id] = str(path)
-            continue
         try:
-            render_clip(a, c, path, cfg)
-            write_json(sidecar, {"fingerprint": fp, "segments": [list(s) for s in c.segments],
-                                 "source": a.meta.source, "candidate": c.id})
-            exported[c.id] = str(path)
-            console.print(f"  [green]✓[/green] {path}")
+            _render_cached(path, render_fingerprint(a, c, cfg), lambda: render_clip(a, c, path, cfg), meta, force)
+            info["vertical"] = str(path)
         except Exception as e:  # one failed render shouldn't lose the report
-            console.print(f"  [red]export failed for {c.id}: {e}[/red]")
+            console.print(f"  [red]vertical export failed for {c.id}: {e}[/red]")
+        if cfg.export.raw_copy:
+            raw = clip_path(out_dir, rank, c.id, result.packaging, raw=True)
+            s, e = raw_window(a, c, cfg)
+            try:
+                _render_cached(raw, render_fingerprint(a, c, cfg, "raw"), lambda: render_raw(a, c, raw, cfg),
+                               {**meta, "raw_window": [s, e]}, force)
+                info.update(raw=str(raw), raw_in=round(c.start - s, 2), raw_out=round(c.end - s, 2))
+            except Exception as ex:
+                console.print(f"  [red]raw export failed for {c.id}: {ex}[/red]")
+        exported[c.id] = info
     return exported

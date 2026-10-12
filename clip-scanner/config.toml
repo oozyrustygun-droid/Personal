@@ -112,6 +112,8 @@ face_deadzone = 0.08           # fraction of crop width the face may drift befor
 crf = 18
 preset = "medium"
 audio_bitrate = "192k"
+raw_copy = true                # also save an untouched landscape cut (no crop/captions) for your own edit
+raw_handles_s = 3.0            # extra footage before/after the clip in the raw cut, for trimming
 
 [captions]
 enabled = true
