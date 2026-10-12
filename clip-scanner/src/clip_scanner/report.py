@@ -22,24 +22,24 @@ STAGE_LABEL = {"deterministic_gates": "hard gate (measured)", "panel": "judging 
 SCRIPTED_BANNER = "SCRIPTED TEST JUDGE, NOT REAL JUDGING"
 
 
-def out_dir_for(a, cfg: Config, scripted: bool = False) -> Path:
+def out_dir_for(meta, cfg: Config, scripted: bool = False) -> Path:
     from .export import slug
 
     # Offline test runs never write into the real output folder.
     suffix = "-SCRIPTED-TEST" if scripted else ""
-    return cfg.output_dir / f"{slug(a.meta.title, 50)}-{a.meta.video_id[-10:]}{suffix}"
+    return cfg.output_dir / f"{slug(meta.title, 50)}-{meta.video_id[-10:]}{suffix}"
 
 
-def write_in_progress(a, cfg: Config, out: Path, scripted: bool = False) -> None:
+def write_in_progress(meta, cfg: Config, out: Path, scripted: bool = False) -> None:
     """Placeholder written before judging, so an interrupted run never leaves an old verdict looking current."""
     out.mkdir(parents=True, exist_ok=True)
     msg = ("IN PROGRESS: a scan of this video started and has not finished. If you are reading this, it "
            "was interrupted or crashed; earlier results are invalid until a run completes.")
     write_json(out / "report.json", {"status": "in_progress", "verdict": "IN PROGRESS / INTERRUPTED",
-                                     "video": {"id": a.meta.video_id, "title": a.meta.title},
+                                     "video": {"id": meta.video_id, "title": meta.title},
                                      "judge_backend": "scripted" if scripted else "anthropic",
                                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
-    (out / "report.md").write_text(f"# clip-scanner report: {a.meta.title}\n\n**{msg}**\n", encoding="utf-8")
+    (out / "report.md").write_text(f"# clip-scanner report: {meta.title}\n\n**{msg}**\n", encoding="utf-8")
 
 
 def verdict_label(result, scripted: bool = False) -> str:

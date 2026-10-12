@@ -97,7 +97,8 @@ def _devil_and_arbiter(c: Candidate, packet: list[dict], outcomes: list[JudgeOut
             purpose="devils_advocate", model=j.model,
             system=prompts.system_blocks(ctx.handbook, "devils_advocate", j.cache_ttl),
             messages=[{"role": "user", "content": [stream] + packet + [
-                {"type": "text", "text": f"THE PANEL'S CASE FOR THIS CLIP:\n{panel_case}\n\nMake the case it flops."}]}],
+                {"type": "text", "text": f"THE PANEL'S CASE FOR THIS CLIP:\n<panel_reasons>\n"
+                                         f"{prompts.data_text(panel_case)}\n</panel_reasons>\n\nMake the case it flops."}]}],
             output=DevilsCase, effort=j.effort, max_tokens=j.max_output_tokens,
             meta=_meta(c, ctx, role="devils_advocate"))
         if res.fallback_used:
@@ -110,8 +111,11 @@ def _devil_and_arbiter(c: Candidate, packet: list[dict], outcomes: list[JudgeOut
             purpose="arbiter", model=j.model,
             system=prompts.system_blocks(ctx.handbook, "arbiter", j.cache_ttl),
             messages=[{"role": "user", "content": packet + [{"type": "text", "text": (
-                f"THE PANEL'S REASONS FOR THIS CLIP:\n{panel_case}\n\n"
-                f"THE DEVIL'S ADVOCATE'S CASE AGAINST IT:\n{json.dumps(devil, indent=1)}\n\nRule.")}]}],
+                f"THE PANEL'S REASONS FOR THIS CLIP:\n<panel_reasons>\n{prompts.data_text(panel_case)}\n</panel_reasons>\n\n"
+                f"THE DEVIL'S ADVOCATE'S CASE AGAINST IT:\n<devils_case>\n"
+                f"{prompts.data_text(json.dumps(devil, indent=1, ensure_ascii=False))}\n</devils_case>\n\n"
+                f"{prompts.excerpts_text(ctx.transcript, prompts.cited_times(json.dumps(devil)), ctx.cfg)}\n\n"
+                f"Rule.")}]}],
             output=ArbiterRuling, effort=j.effort, max_tokens=j.max_output_tokens,
             meta=_meta(c, ctx, role="arbiter", devil=devil))
         if res.fallback_used:
@@ -307,6 +311,12 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
     if any(d.stage == "error" for d in ordered):
         status = "unavailable" if all(d.stage in ("error", "deterministic_gates") for d in ordered) and \
             any("credentials" in r for d in ordered for r in d.reasons) else "incomplete"
+    if ordered and not ctx.signals.events_available and cfg.gates.require_music_check and status == "complete":
+        # Every candidate failed the music gate because music couldn't be measured: that's not a
+        # verdict about the video.
+        status = "incomplete"
+        notes.append("Music could not be measured (audio-event model unavailable), so every candidate failed "
+                     "the music gate. Run `clip-scanner doctor`, fix it, and re-run.")
     result = JudgingResult(decisions=ordered, great=great, status=status, notes=notes)
     by_id = {c.id: c for c in cands}
     for d in great:

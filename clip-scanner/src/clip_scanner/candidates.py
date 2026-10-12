@@ -304,7 +304,7 @@ def candidates_stage(ws: Workspace, transcript: Transcript, sig: Signals, signal
                      cfg: Config, llm=None, *, console=None, force: bool = False) -> tuple[list[Candidate], str]:
     use_llm = cfg.candidates.llm_proposer and llm is not None
     fp = fingerprint("candidates", CANDIDATES_VERSION, cfg.section_hash("candidates", "gates"), signals_fp,
-                     use_llm and cfg.candidates.proposer_model, cfg.export.preroll_s)
+                     use_llm and cfg.candidates.proposer_model, use_llm and llm.backend, cfg.export.preroll_s)
     out = ws.path("candidates.json")
     if not force and ws.is_done("candidates", fp, [out]):
         cached = read_json(out)

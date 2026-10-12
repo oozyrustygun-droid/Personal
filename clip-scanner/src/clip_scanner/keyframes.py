@@ -8,7 +8,6 @@ never claim that a frame shows a payoff.
 
 from __future__ import annotations
 
-import bisect
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +20,7 @@ from .config import Config
 from .media import MediaError, extract_frame, probe
 from .signals import Signals
 
-KEYFRAMES_VERSION = 2
-TRACK_FPS = 2.0  # face-track sampling for keyframes (export uses export.face_sample_fps)
+KEYFRAMES_VERSION = 3
 
 
 @dataclass
@@ -58,7 +56,7 @@ def keyframe_times(c: Candidate, sig: Signals, n: int) -> list[tuple[float, str]
 def extract_keyframes(ws: Workspace, media: Path, cands: list[Candidate], sig: Signals, cfg: Config,
                       candidates_fp: str) -> dict[str, list[Keyframe]]:
     from .export import crop_geometry
-    from .facetrack import crop_path
+    from .facetrack import shared_crop_path, x_at
 
     jc = cfg.judging
     sw, sh = probe(media).display_size
@@ -80,12 +78,11 @@ def extract_keyframes(ws: Workspace, media: Path, cands: list[Candidate], sig: S
             continue
         folder.mkdir(parents=True, exist_ok=True)
         if horizontal:
-            path = crop_path(media, c.segments, sw, sh, crop_w, cfg, fps=TRACK_FPS) or [(0.0, (sw - crop_w) // 2)]
-            pts = [t for t, _ in path]
+            # Identical to the export: same cached path, same "last command at or before t" rule, same fallback.
+            path = shared_crop_path(ws.root, media, c.segments, sw, sh, crop_w, cfg)
         for k in missing:
             if horizontal:
-                i = min(max(bisect.bisect_left(pts, k.clip_t), 0), len(path) - 1)
-                x = path[i][1]
+                x = x_at(path, k.clip_t, default=(sw - crop_w) // 2)
                 vf = f"crop={crop_w}:{crop_h}:{x}:{crop_y},scale=-2:{jc.keyframe_width}"
             else:
                 vf = f"crop={crop_w}:{crop_h}:0:{crop_y},scale=-2:{jc.keyframe_width}"

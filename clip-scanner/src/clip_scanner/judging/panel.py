@@ -19,6 +19,7 @@ import math
 from dataclasses import asdict, dataclass, field
 
 from ..config import GATE_NAMES, RUBRIC_CRITERIA, Config
+from ..llm import same_model
 from .gates import GateResult
 
 GATE_LABELS = {
@@ -109,7 +110,7 @@ def assess_judge(outcome: JudgeOutcome, cfg: Config) -> JudgeAssessment:
         why = outcome.error or ("not run" if outcome.skipped else "no verdict")
         return JudgeAssessment(p, False, None, None, None, [], [f"{p}: no valid verdict ({why})"], unavailable=True)
     served = outcome.served_model
-    if outcome.fallback or (served and not (served == j.model or served.startswith(j.model + "-"))):
+    if outcome.fallback or (served and not same_model(served, j.model)):
         # A refusal answered by another model is not this judge's verdict. Treat it as no verdict.
         return JudgeAssessment(p, False, None, None, None, [],
                                [f"{p}: verdict came from {served or 'a fallback model'}, not {j.model}"],

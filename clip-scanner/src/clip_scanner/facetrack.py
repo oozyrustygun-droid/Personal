@@ -113,3 +113,30 @@ def crop_path(src: Path, segments: list[tuple[float, float]], src_w: int, src_h:
         offset += e - s
     path = smooth_path(out_times, raw, crop_frac, cfg)
     return [(t, int(round(min(max(c * src_w - crop_w / 2, 0), src_w - crop_w)))) for t, c in zip(out_times, path)]
+
+
+def x_at(path: list[tuple[float, int]], t: float, default: int) -> int:
+    """Crop x in effect at time t, with the same rule as ffmpeg sendcmd: the last command at or before t."""
+    import bisect
+
+    if not path:
+        return default
+    i = bisect.bisect_right([p[0] for p in path], t + 1e-6) - 1
+    return path[max(i, 0)][1]
+
+
+def shared_crop_path(cache_dir: Path, src: Path, segments: list[tuple[float, float]], src_w: int, src_h: int,
+                     crop_w: int, cfg: Config) -> list[tuple[float, int]]:
+    """The ONE crop path for a clip, computed at the export's sampling rate and cached, so the keyframes
+    the judges see and the exported video are cropped identically."""
+    import json
+
+    from .cache import fingerprint, write_json
+
+    fp = fingerprint("croppath", [list(x) for x in segments], src_w, src_h, crop_w, cfg.section_hash("export"))
+    path_file = Path(cache_dir) / "croppaths" / f"{fp}.json"
+    if path_file.exists():
+        return [tuple(x) for x in json.loads(path_file.read_text())]
+    path = crop_path(src, segments, src_w, src_h, crop_w, cfg)
+    write_json(path_file, [list(x) for x in path])
+    return path

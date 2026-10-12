@@ -43,13 +43,17 @@ def make_llm(cfg: Config, ws: Workspace, tracker: CostTracker, judge_backend: st
 
 
 def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_backend: str = "anthropic",
-            scripted_judge: str | None = None, single_window: bool = False, quiet: bool = False) -> Analysis:
-    """Stages 1-4 (+ keyframes). `single_window` treats the whole file as one candidate (calibration)."""
+            scripted_judge: str | None = None, single_window: bool = False, quiet: bool = False,
+            on_ingested=None) -> Analysis:
+    """Stages 1-4 (+ keyframes). `single_window` treats the whole file as one candidate (calibration).
+    `on_ingested(meta)` runs as soon as the video is identified, before any slow stage."""
     out = console if not quiet else None
     with stage("Ingest") as st:
         meta, ws = ingest(source, cfg, console=out)
         st["note"] = f"{meta.title} · {meta.duration / 60:.1f} min · {meta.width}x{meta.height}"
     console.print(f"  [dim]workspace: {ws.root}[/dim]")
+    if on_ingested is not None:
+        on_ingested(meta)
     with stage("Transcribe") as st:
         before = ws.stage_fingerprint("transcribe")
         transcript, t_fp = transcribe(ws, cfg, console=out, force="transcribe" in rerun)
@@ -92,13 +96,26 @@ def print_estimate(est: dict) -> None:
 
 
 def run_scan_cli(args: argparse.Namespace) -> int:
+    from .export import (expected_files, export_clips, prune_stale_clips, restore_all, restore_exports,
+                         stash_exports)
     from .judging.runner import build_context, confirm_cost, run_judging
     from .report import out_dir_for, print_report, write_in_progress, write_reports
 
     cfg = load_config(args.config)
     max_clips = args.max_clips or cfg.general.max_clips
+    scripted = args.judge_backend == "scripted"
+    state: dict = {}
+
+    def on_ingested(meta) -> None:
+        # From here on, an interrupted run leaves an IN PROGRESS marker, never the previous verdict.
+        state["out_dir"] = out_dir = out_dir_for(meta, cfg, scripted=scripted)
+        if not args.dry_run:
+            stash_exports(out_dir)
+            write_in_progress(meta, cfg, out_dir, scripted=scripted)
+
     a = analyze(args.source, cfg, rerun=set(args.rerun), judge_backend=args.judge_backend,
-                scripted_judge=args.scripted_judge)
+                scripted_judge=args.scripted_judge, on_ingested=on_ingested)
+    out_dir = state["out_dir"]
     ctx = build_context(cfg, a.llm, a.transcript, a.signals, a.frames, a.meta.title, a.meta.uploader,
                         a.meta.duration)
 
@@ -108,19 +125,21 @@ def run_scan_cli(args: argparse.Namespace) -> int:
             return False
         return confirm_cost(est, cfg, args.yes, console)
 
-    from .export import expected_files, export_clips, prune_stale_clips, restore_exports, stash_exports
-
-    scripted = args.judge_backend == "scripted"
-    out_dir = out_dir_for(a, cfg, scripted=scripted)
-    if not args.dry_run:
-        # If this run dies mid-way, the folder must say so, and must not keep showing old GREAT clips.
-        write_in_progress(a, cfg, out_dir, scripted=scripted)
-        stash_exports(out_dir)
     with stage("Judging"):
         result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate)
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")
         return 0
+    if result.status == "unavailable":
+        # Nothing was judged (cancelled at the cost prompt, or no credentials): leave the previous
+        # results exactly as they were. With nothing to restore, report why judging didn't run.
+        if restore_all(out_dir):
+            console.print("[yellow]Judging did not run; the previous report and clips were left in place.[/yellow]")
+        else:
+            write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, scripted=scripted)
+        for n in result.notes:
+            console.print(f"[yellow]{n}[/yellow]")
+        return 3
     keep = expected_files(out_dir, a, result, cfg)
     restore_exports(out_dir, keep)
     paths = write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, scripted=scripted)

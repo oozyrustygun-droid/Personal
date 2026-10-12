@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 from .cache import fingerprint, read_json, write_json
 from .captions import TimedWord, build_ass
 from .config import Config
-from .facetrack import crop_path
+from .facetrack import shared_crop_path
 from .media import hwaccel_args, probe, require_binary
 from .ui import console
 
@@ -51,7 +52,10 @@ def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
     total = sum(e - s for s, e in segs)
     crop_w, crop_h, crop_y = crop_geometry(sw, sh, ex.width, ex.height)
     horizontal = crop_w < sw
-    path = crop_path(src, segs, sw, sh, crop_w, cfg) if horizontal else [(0.0, 0)]
+    center = (sw - crop_w) // 2
+    path = shared_crop_path(a.ws.root, src, segs, sw, sh, crop_w, cfg) if horizontal else []
+    if horizontal and not path:
+        path = [(0.0, center)]  # same fallback as the judges' keyframes: a centred crop
     x0 = path[0][1] if path else 0
 
     with tempfile.TemporaryDirectory(prefix="clipscan-") as td:
@@ -166,33 +170,62 @@ def prune_stale_clips(out_dir: Path, keep: dict[str, str]) -> list[Path]:
 
 
 STASH = ".previous-run"
+REPORTS = ("report.json", "report.md")
+
+
+def _is_in_progress(report_json: Path) -> bool:
+    try:
+        return read_json(report_json).get("status") == "in_progress"
+    except (OSError, ValueError):
+        return True
 
 
 def stash_exports(out_dir: Path) -> None:
-    """Before judging, move earlier exports out of sight. If this run is interrupted, clips/ must not
-    keep offering clips that a tightened bar might now reject."""
+    """Before a scan, move the previous report and exports out of sight. If this run is interrupted, the
+    folder must not keep offering a verdict or clips that a tightened bar might now reject."""
+    stash = out_dir / STASH
+    (stash / "clips").mkdir(parents=True, exist_ok=True)
     clips = out_dir / "clips"
-    if not clips.exists():
-        return
-    stash = clips / STASH
-    stash.mkdir(parents=True, exist_ok=True)
-    for p in list(clips.glob("*.mp4")) + list(clips.glob("*.json")):
-        p.replace(stash / p.name)
+    if clips.exists():
+        for p in list(clips.glob("*.mp4")) + list(clips.glob("*.json")):
+            p.replace(stash / "clips" / p.name)
+    if (out_dir / "report.json").exists() and not _is_in_progress(out_dir / "report.json"):
+        for name in REPORTS:  # keep the last COMPLETED report; never stash an in-progress marker over it
+            if (out_dir / name).exists():
+                (out_dir / name).replace(stash / name)
 
 
 def restore_exports(out_dir: Path, keep: dict[str, str]) -> None:
     """After judging, bring back stashed renders that are still justified (saves re-encoding); drop the rest."""
-    stash = out_dir / "clips" / STASH
+    stash = out_dir / STASH
     if not stash.exists():
         return
-    for p in stash.glob("*.mp4"):
+    (out_dir / "clips").mkdir(parents=True, exist_ok=True)
+    for p in (stash / "clips").glob("*.mp4"):
         target = out_dir / "clips" / p.name
         if str(target) in keep and _sidecar_fp(p) == keep[str(target)]:
             p.with_suffix(".json").replace(target.with_suffix(".json"))
             p.replace(target)
-    for p in stash.iterdir():
-        p.unlink(missing_ok=True)
-    stash.rmdir()
+    shutil.rmtree(stash, ignore_errors=True)
+
+
+def restore_all(out_dir: Path) -> bool:
+    """Judging never ran (cancelled at the cost prompt, no credentials, --dry-run): put the previous
+    report and clips back exactly as they were. Returns True if there was something to restore."""
+    stash = out_dir / STASH
+    if not stash.exists():
+        return False
+    restored = False
+    for name in REPORTS:
+        if (stash / name).exists():
+            (stash / name).replace(out_dir / name)
+            restored = True
+    (out_dir / "clips").mkdir(parents=True, exist_ok=True)
+    for p in (stash / "clips").iterdir():
+        p.replace(out_dir / "clips" / p.name)
+        restored = True
+    shutil.rmtree(stash, ignore_errors=True)
+    return restored
 
 
 def _render_cached(path: Path, fp: str, render, meta: dict, force: bool) -> bool:

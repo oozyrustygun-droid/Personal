@@ -59,7 +59,8 @@ def test_setting_one_floor_keeps_the_other(tmp_path):
 @pytest.mark.parametrize("snippet", ["[judging]\noverall_min = nan\n", "[judging]\nrubric_mean_min = inf\n",
                                      "[devils_advocate]\nmin_survival_confidence = nan\n",
                                      "[judging.criterion_floors]\npayoff = nan\n", "[judging]\noverall_min = 11.0\n",
-                                     "[gates]\nmax_dead_air_s = nan\n"])
+                                     "[gates]\nmax_dead_air_s = nan\n", "[gates]\nmusic_prob = 50\n",
+                                     "[gates]\nmusic_bed_max_fraction = 50\n"])
 def test_non_finite_or_out_of_range_thresholds_rejected(tmp_path, snippet):
     f = tmp_path / "config.toml"
     f.write_text(snippet)

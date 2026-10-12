@@ -122,6 +122,11 @@ class GatesCfg(_Section):
                 "music_bed_max_fraction")
         if not 0 < self.min_len_s < self.max_len_s:
             raise ValueError("gates: need 0 < min_len_s < max_len_s")
+        for name in ("music_prob", "music_bed_max_fraction"):  # "50" meaning 50% would disable the gate
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"gates.{name} must be between 0 and 1 (e.g. 0.5, not 50)")
+        if self.hook_window_s <= 0 or self.max_dead_air_s <= 0:
+            raise ValueError("gates: hook_window_s and max_dead_air_s must be > 0")
         return self
 
 

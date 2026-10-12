@@ -97,3 +97,46 @@ def test_smooth_path_returns_to_center_when_face_lost():
     path = smooth_path(times, xs, crop_frac=0.316, cfg=cfg)
     assert path[25] == pytest.approx(path[19], abs=0.03)  # held briefly
     assert path[-1] == pytest.approx(0.5, abs=0.06)       # then eased back to centre
+
+
+def test_stash_restore_cycle(tmp_path):
+    """Interrupted runs hide old results; cancelled runs restore them; completed runs keep only what's justified."""
+    import json
+
+    from clip_scanner.export import STASH, restore_all, restore_exports, stash_exports
+
+    out = tmp_path / "out"
+    (out / "clips").mkdir(parents=True)
+    (out / "report.json").write_text(json.dumps({"status": "complete", "verdict": "1 GREAT CLIP"}))
+    (out / "report.md").write_text("old")
+    for name, fp in (("01-a-c01.mp4", "fpA"), ("02-b-c02.mp4", "fpB")):
+        (out / "clips" / name).write_text("video")
+        (out / "clips" / name).with_suffix(".json").write_text(json.dumps({"fingerprint": fp}))
+
+    stash_exports(out)
+    assert not list((out / "clips").glob("*.mp4")) and not (out / "report.json").exists()
+    (out / "report.json").write_text(json.dumps({"status": "in_progress"}))  # the marker a run writes
+    assert restore_all(out)                                                   # e.g. cancelled at the cost prompt
+    assert json.loads((out / "report.json").read_text())["verdict"] == "1 GREAT CLIP"
+    assert len(list((out / "clips").glob("*.mp4"))) == 2 and not (out / STASH).exists()
+
+    stash_exports(out)
+    keep = {str(out / "clips" / "01-a-c01.mp4"): "fpA", str(out / "clips" / "02-b-c02.mp4"): "fpCHANGED"}
+    restore_exports(out, keep)                     # completed run: only the still-justified render returns
+    assert [p.name for p in (out / "clips").glob("*.mp4")] == ["01-a-c01.mp4"]
+    assert not (out / STASH).exists()
+
+
+def test_stash_never_overwrites_last_completed_report_with_a_marker(tmp_path):
+    import json
+
+    from clip_scanner.export import restore_all, stash_exports
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "report.json").write_text(json.dumps({"status": "complete", "verdict": "NO GREAT CLIPS"}))
+    stash_exports(out)
+    (out / "report.json").write_text(json.dumps({"status": "in_progress"}))   # run crashed here
+    stash_exports(out)                                                         # next run starts
+    assert restore_all(out)
+    assert json.loads((out / "report.json").read_text())["verdict"] == "NO GREAT CLIPS"

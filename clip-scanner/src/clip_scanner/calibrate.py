@@ -162,8 +162,9 @@ def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: 
     if scripted:
         return "verdicts came from the scripted test judge, not Claude"
     if hits < MIN_PER_LABEL_TO_WRITE or flops < MIN_PER_LABEL_TO_WRITE:
-        return (f"need at least {MIN_PER_LABEL_TO_WRITE} labelled hits AND {MIN_PER_LABEL_TO_WRITE} flops "
-                f"(have {hits} hits, {flops} flops); a bar tuned on less overfits")
+        return (f"need at least {MIN_PER_LABEL_TO_WRITE} hits AND {MIN_PER_LABEL_TO_WRITE} flops that the panel "
+                f"actually scored (have {hits} hits, {flops} flops; clips killed by a hard gate or an error "
+                f"don't count); a bar tuned on less overfits")
     loose = loosened(rec, cfg)
     if loose and not allow_loosen:
         return ("the recommendation LOOSENS the bar (" + "; ".join(loose) + "). Re-run with --allow-loosen "
@@ -257,6 +258,12 @@ def run_calibrate(args: argparse.Namespace) -> int:
                           f"[dim]{d.min_effective if d.min_effective is not None else '–'} "
                           f"{d.reasons[0] if d.reasons else ''}[/dim]")
 
+    # Only clips the panel actually scored constrain the thresholds being swept. A flop killed by a hard
+    # gate or an error says nothing about overall_min or survival confidence.
+    informative = {"hit": 0, "flop": 0}
+    for lab, d in labeled:
+        if d.stage in ("panel", "devils_advocate", "great"):
+            informative[lab] += 1
     current = metrics([(lab, d.great) for lab, d in labeled])
     sw = sweep(labeled, cfg)
     hit_scores = [r["min_effective"] for r in table if r["label"] == "hit" and r["min_effective"] is not None]
@@ -281,7 +288,8 @@ def run_calibrate(args: argparse.Namespace) -> int:
         console.print(f"[red]{sw['note']}[/red]")
 
     out_dir = manifest.parent / "results" / time.strftime("%Y%m%d-%H%M%S")
-    write_json(out_dir / "calibration.json", {"current": current, "recommended": rec, "note": sw["note"],
+    write_json(out_dir / "calibration.json", {"judge_backend": args.judge_backend, "informative": informative,
+                                              "current": current, "recommended": rec, "note": sw["note"],
                                               "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})
     console.print(f"[dim]details: {out_dir / 'calibration.json'} · API cost this run {fmt_usd(total_cost)}[/dim]")
     if rec:
@@ -289,7 +297,8 @@ def run_calibrate(args: argparse.Namespace) -> int:
         if loose:
             console.print(f"[yellow]Note: this would LOOSEN the bar: {'; '.join(loose)}[/yellow]")
     if args.write_config:
-        refusal = write_guard(rec, cfg, hits, flops, args.judge_backend == "scripted", args.allow_loosen)
+        refusal = write_guard(rec, cfg, informative["hit"], informative["flop"], args.judge_backend == "scripted",
+                              args.allow_loosen)
         if refusal:
             console.print(f"[red]Not writing config.toml: {refusal}.[/red]")
             return 1

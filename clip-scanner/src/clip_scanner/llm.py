@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,9 +76,9 @@ def strict_schema(model: type[BaseModel]) -> dict:
     return walk(schema)
 
 
-def _same_model(served: str | None, requested: str) -> bool:
+def same_model(served: str | None, requested: str) -> bool:
     """The API may report a dated snapshot id for the requested alias; anything else is a different model."""
-    return bool(served) and (served == requested or served.startswith(requested + "-"))
+    return bool(served) and re.fullmatch(re.escape(requested) + r"(-\d{8})?", served) is not None
 
 
 def _hash_request(payload: dict) -> str:
@@ -149,7 +150,7 @@ class LLM:
             served = hit.get("served_model", model)
             return LLMResult(data=self._validate(output, hit["data"]), usages=usages, cached=True,
                              served_model=served, request_hash=rh,
-                             fallback_used=hit.get("fallback_used", not _same_model(served, model)))
+                             fallback_used=hit.get("fallback_used", not same_model(served, model)))
 
         if self.backend == "scripted":
             if self.script is None:
@@ -163,7 +164,7 @@ class LLM:
                                                    fallbacks=fallbacks)
         self.tracker.record(purpose, usages, cached=False)
         validated = self._validate(output, data, purpose=purpose, rh=rh, usages=usages)
-        fallback_used = not _same_model(served, model) or any(u.model and not _same_model(u.model, model)
+        fallback_used = not same_model(served, model) or any(u.model and not same_model(u.model, model)
                                                                for u in usages[1:])
         write_json(self.store_dir / purpose / f"{rh}.json",
                    {"data": data, "usages": [u.to_json() for u in usages], "served_model": served,
