@@ -12,7 +12,7 @@ from .cache import fingerprint, read_json, write_json
 from .captions import TimedWord, build_ass
 from .config import Config
 from .facetrack import shared_crop_path
-from .media import MediaError, extract_frame, hwaccel_args, probe, require_binary
+from .media import INSTALL_HINT, MediaError, captions_burnable, extract_frame, hwaccel_args, probe, require_binary
 from .ui import console
 
 
@@ -62,7 +62,8 @@ def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
         tdp = Path(td)
         cmds = "\n".join(f"{t:.3f} crop@c x {x};" for t, x in path) + "\n"
         (tdp / "crop.cmd").write_text(cmds)
-        if cfg.captions.enabled:
+        burn = captions_burnable(cfg)
+        if burn:
             ass = build_ass(timed_words(cand, a.transcript, segs), cfg.captions, ex.width, ex.height, total)
             (tdp / "captions.ass").write_text(ass, encoding="utf-8")
         inputs: list[str] = []
@@ -79,7 +80,7 @@ def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
         vf = [f"sendcmd=f=crop.cmd,crop@c=w={crop_w}:h={crop_h}:x={x0}:y={crop_y}" if horizontal
               else f"crop=w={crop_w}:h={crop_h}:x=0:y={crop_y}",
               f"scale={ex.width}:{ex.height}:flags=lanczos", "setsar=1", "format=yuv420p"]
-        if cfg.captions.enabled:
+        if burn:
             vf.append("ass=captions.ass")
         fade_in = min(0.12, pre) if pre > 0 else 0.05
         graph = ";".join(chains + [
@@ -118,8 +119,10 @@ def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict, raw: bool
 
 
 def render_fingerprint(a, cand, cfg: Config, kind: str = "vertical") -> str:
+    # The effective caption state counts: installing a libass ffmpeg later re-renders with captions.
+    burned = captions_burnable(cfg) if kind == "vertical" else False
     return fingerprint("render", kind, a.meta.video_id, [list(s) for s in cand.segments],
-                       cfg.section_hash("export", "captions"))
+                       cfg.section_hash("export", "captions"), burned)
 
 
 def raw_window(a, cand, cfg: Config) -> tuple[float, float]:
@@ -256,9 +259,13 @@ def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> 
     """Render each GREAT clip. Returns {candidate_id: {"vertical", "raw", "raw_in", "raw_out"}}."""
     by_id = {c.id: c for c in a.candidates}
     exported: dict[str, dict] = {}
+    burned = captions_burnable(cfg)
+    if cfg.captions.enabled and not burned and result.great:
+        console.print(f"  [yellow]This ffmpeg can't burn in captions (no libass), so the vertical clips have none. "
+                      f"Fix: {INSTALL_HINT}, then re-run (the clips re-render with captions).[/yellow]")
     for rank, d in enumerate(result.great, 1):
         c = by_id[d.candidate_id]
-        info: dict = {"vertical": None, "raw": None}
+        info: dict = {"vertical": None, "raw": None, "captions": burned}
         meta = {"segments": [list(s) for s in c.segments], "source": a.meta.source, "candidate": c.id}
         path = clip_path(out_dir, rank, c.id, result.packaging)
         try:

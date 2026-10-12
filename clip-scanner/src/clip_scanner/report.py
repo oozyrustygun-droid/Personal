@@ -95,6 +95,7 @@ def _clip_json(rank, d, c, pkg, exported) -> dict:
         "raw_file": (exported.get(c.id) or {}).get("raw"),
         "poster": (exported.get(c.id) or {}).get("poster"),
         "raw_clip_in_out": [(exported.get(c.id) or {}).get("raw_in"), (exported.get(c.id) or {}).get("raw_out")],
+        "captions_burned": (exported.get(c.id) or {}).get("captions"),
     }
 
 
@@ -171,7 +172,10 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
               f"- **Panel (effective scores):** {judges}",
               f"- **Devil's advocate:** {c['devils_advocate'] or 'n/a'}",
               f"- **Arbiter:** survived (confidence {arb.get('survival_confidence')}): {arb.get('decisive_issue') or ''}",
-              f"- **File (vertical, captioned):** {c['file'] or '(not exported)'}",
+              f"- **File (vertical{'' if c.get('captions_burned') is False else ', captioned'}):** "
+              f"{c['file'] or '(not exported)'}"
+              + (" (no burned-in captions: this ffmpeg lacks libass; `brew install ffmpeg-full` and re-run)"
+                 if c.get("captions_burned") is False and c["file"] else ""),
               f"- **Raw landscape cut for editing:** {c['raw_file'] or '(not exported)'}"
               + (f" (clip runs {c['raw_clip_in_out'][0]:.1f}s → {c['raw_clip_in_out'][1]:.1f}s inside it)"
                  if c['raw_file'] and c['raw_clip_in_out'][0] is not None else ""), ""]

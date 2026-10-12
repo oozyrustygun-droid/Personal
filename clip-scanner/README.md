@@ -27,7 +27,7 @@ Ran on your Claude plan through Claude Code: $0 in API charges …
 ## Setup (M-series Mac)
 
 ```bash
-brew install ffmpeg uv
+brew install ffmpeg-full uv
 cd ~/clip-scanner
 uv sync                                  # Python 3.12 + all deps (mlx-whisper on Apple Silicon)
 claude                                   # Claude Code: log in once with your Claude account (/login), then exit
@@ -54,6 +54,10 @@ servers, plugins, hooks or settings files loaded: they see only the clip and the
 
 To use the paid Claude API instead, set `[judging] backend = "api"` (or pass `--judge-backend api`) and
 `export ANTHROPIC_API_KEY=sk-ant-...`.
+
+Use `ffmpeg-full`, not plain `ffmpeg`: Homebrew's plain formula no longer includes libass, which burns in
+the captions. clip-scanner finds `ffmpeg-full` on its own even though Homebrew doesn't put it on PATH.
+Without libass the clips still export, just without burned-in captions.
 
 Linux also needs `apt install ffmpeg libegl1 libgles2` (MediaPipe's native library links EGL).
 Optional speaker diarization: `uv sync --extra diarize` plus a Hugging Face token in `HF_TOKEN` that

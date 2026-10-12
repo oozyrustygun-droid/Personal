@@ -1,3 +1,4 @@
+import os
 import pytest
 
 from clip_scanner.candidates import Candidate
@@ -140,3 +141,29 @@ def test_stash_never_overwrites_last_completed_report_with_a_marker(tmp_path):
     stash_exports(out)                                                         # next run starts
     assert restore_all(out)
     assert json.loads((out / "report.json").read_text())["verdict"] == "NO GREAT CLIPS"
+
+
+def _fake_ffmpeg(dirpath, filters):
+    import stat
+
+    dirpath.mkdir(parents=True, exist_ok=True)
+    exe = dirpath / "ffmpeg"
+    lines = ["Filters:", "  T.. = Timeline support", *(f" ..C {f:<16} V->V       test filter" for f in filters)]
+    # echo is a shell builtin: the test PATH holds nothing but the fake ffmpeg
+    exe.write_text("#!/bin/sh\n" + "".join(f"echo '{line}'\n" for line in lines))
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    return exe
+
+
+def test_keg_only_ffmpeg_full_goes_first_on_path(tmp_path, monkeypatch):
+    from clip_scanner.media import has_filter, prefer_full_ffmpeg
+
+    plain = _fake_ffmpeg(tmp_path / "plain", ["sendcmd", "scale"])          # Homebrew's slim ffmpeg
+    full = _fake_ffmpeg(tmp_path / "ffmpeg-full" / "bin", ["ass", "sendcmd", "scale"])
+    monkeypatch.setenv("PATH", str(plain.parent))
+    assert not has_filter("ass") and has_filter("sendcmd")
+    assert prefer_full_ffmpeg((str(tmp_path / "missing"), str(full.parent))) == str(full.parent)
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(full.parent)
+    assert has_filter("ass")
+    prefer_full_ffmpeg((str(full.parent),))  # idempotent
+    assert os.environ["PATH"].split(os.pathsep).count(str(full.parent)) == 1

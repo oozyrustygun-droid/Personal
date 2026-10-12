@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -17,12 +18,52 @@ class MediaError(RuntimeError):
     pass
 
 
+# Homebrew's regular `ffmpeg` formula no longer includes libass (burned-in captions). `ffmpeg-full` does,
+# but it is keg-only, so it isn't on PATH. When it is installed we put it first on PATH, so every
+# program that shells out to ffmpeg (our exports, yt-dlp, mlx-whisper) uses the same full build.
+FFMPEG_FULL_DIRS = ("/opt/homebrew/opt/ffmpeg-full/bin", "/usr/local/opt/ffmpeg-full/bin",
+                    "/home/linuxbrew/.linuxbrew/opt/ffmpeg-full/bin")
+INSTALL_HINT = ("brew install ffmpeg-full" if platform.system() == "Darwin"
+                else "install ffmpeg (with libass) using your package manager")
+
+
+def prefer_full_ffmpeg(dirs: tuple[str, ...] = FFMPEG_FULL_DIRS) -> str | None:
+    """Put a keg-only Homebrew ffmpeg-full first on PATH. Returns its directory, if found."""
+    for d in dirs:
+        exe = Path(d) / "ffmpeg"
+        if exe.is_file() and os.access(exe, os.X_OK):
+            parts = os.environ.get("PATH", "").split(os.pathsep)
+            if d not in parts:
+                os.environ["PATH"] = os.pathsep.join([d, *[p for p in parts if p]])
+            return d
+    return None
+
+
 def require_binary(name: str) -> str:
     path = shutil.which(name)
     if not path:
-        hint = "brew install ffmpeg" if platform.system() == "Darwin" else "install ffmpeg with your package manager"
-        raise MediaError(f"`{name}` not found on PATH ({hint}).")
+        raise MediaError(f"`{name}` not found on PATH ({INSTALL_HINT}).")
     return path
+
+
+@lru_cache(maxsize=8)
+def _filters(binary: str) -> str:
+    try:
+        return subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, text=True,
+                              timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def has_filter(name: str) -> bool:
+    """Whether the ffmpeg on PATH has this filter (e.g. "ass" needs libass, "sendcmd")."""
+    binary = shutil.which("ffmpeg")
+    return bool(binary) and any(line.split()[1:2] == [name] for line in _filters(binary).splitlines())
+
+
+def captions_burnable(cfg) -> bool:
+    """Captions are on and this ffmpeg can burn them in."""
+    return cfg.captions.enabled and has_filter("ass")
 
 
 def run(cmd: list[str], *, capture: bool = True, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:

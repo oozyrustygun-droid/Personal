@@ -6,11 +6,11 @@ import importlib.util
 import os
 import platform
 import shutil
-import subprocess
 import sys
 
 from .cli_common import BACKEND_LABEL, resolve_backend
 from .config import load_config
+from .media import INSTALL_HINT, has_filter
 from .ui import console
 
 
@@ -18,6 +18,12 @@ def _ok(flag: bool, label: str, detail: str = "") -> bool:
     mark = "[green]✓[/green]" if flag else "[red]✗[/red]"
     console.print(f"  {mark} {label}" + (f" [dim]{detail}[/dim]" if detail else ""))
     return flag
+
+
+def _optional(flag: bool, label: str, detail: str = "") -> None:
+    """Nice-to-have: shown, but never as a failure."""
+    mark = "[green]✓[/green]" if flag else "[dim]–[/dim]"
+    console.print(f"  {mark} {label}" + (f" [dim]{detail}[/dim]" if detail else ""))
 
 
 def _check_claude_code(cfg) -> bool:
@@ -40,12 +46,14 @@ def run_doctor(argv: list[str]) -> int:
     good = True
     good &= _ok(sys.version_info[:2] == (3, 12), "Python 3.12", platform.python_version())
     ff = shutil.which("ffmpeg")
-    good &= _ok(bool(ff), "ffmpeg on PATH", ff or "brew install ffmpeg")
+    good &= _ok(bool(ff), "ffmpeg on PATH", ff or INSTALL_HINT)
     if ff:
-        filters = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True).stdout
-        good &= _ok(" ass " in filters, "ffmpeg built with libass (burned-in captions)")
-        _ok(" sendcmd " in filters, "ffmpeg sendcmd filter (face-tracked crop)")
-    good &= _ok(bool(shutil.which("ffprobe")), "ffprobe on PATH")
+        libass = has_filter("ass")
+        good &= _ok(libass, "ffmpeg built with libass (burned-in captions)",
+                    "" if libass else f"{INSTALL_HINT}  (Homebrew's plain `ffmpeg` no longer includes it; "
+                                      "clip-scanner finds ffmpeg-full automatically)")
+        good &= _ok(has_filter("sendcmd"), "ffmpeg sendcmd filter (face-tracked crop)")
+    good &= _ok(bool(shutil.which("ffprobe")), "ffprobe on PATH", "" if shutil.which("ffprobe") else INSTALL_HINT)
 
     try:
         cfg = load_config()
@@ -74,10 +82,10 @@ def run_doctor(argv: list[str]) -> int:
     if importlib.util.find_spec("pocketsphinx"):
         backends.append("pocketsphinx (test only)")
     good &= _ok(bool(backends), "transcription backend", ", ".join(backends) or "uv sync")
-    _ok(bool(importlib.util.find_spec("pyannote")), "speaker diarization (optional)",
-        "uv sync --extra diarize + HF_TOKEN" if not importlib.util.find_spec("pyannote") else "pyannote.audio")
+    _optional(bool(importlib.util.find_spec("pyannote")), "speaker diarization (optional, not needed)",
+              "pyannote.audio" if importlib.util.find_spec("pyannote") else "skip it, or: uv sync --extra diarize + HF_TOKEN")
     good &= _ok(bool(importlib.util.find_spec("mediapipe")), "mediapipe (face tracking, YAMNet audio events)")
     good &= _ok(bool(importlib.util.find_spec("scenedetect")), "PySceneDetect")
     good &= _ok(bool(importlib.util.find_spec("yt_dlp")), "yt-dlp")
-    console.print("[green]ready[/green]" if good else "[red]fix the items marked ✗[/red]")
+    console.print("[green]ready[/green]" if good else "[red]fix the items marked ✗ (items marked – are optional)[/red]")
     return 0 if good else 1
