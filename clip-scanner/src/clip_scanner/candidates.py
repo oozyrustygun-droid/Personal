@@ -22,7 +22,7 @@ from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 5
+CANDIDATES_VERSION = 6
 
 
 @dataclass
@@ -243,9 +243,11 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
     for g in groups:
         peak = g["peak"]
         variants = []
-        targets = list(g["starts"] or [])
-        targets += [peak - L for L in cc.target_lens_s]
         payoff = max(peak, g.get("end", peak) - 0.5) if g["origin"] == "llm" else g["payoff"]
+        # Length variants are measured back from the payoff (so "14 s" really is a ~14 s clip), plus a
+        # cold open that starts just before the peak, for moments where the peak itself is the hook.
+        targets = list(g["starts"] or [])
+        targets += [payoff - L for L in cc.target_lens_s] + [peak - 3.0]
         seen = set()
         for ts in targets:
             ts = max(0.0, ts)

@@ -25,8 +25,10 @@ from clip_scanner.transcribe import Transcript
 pytestmark = pytest.mark.e2e
 FIX = Path(__file__).parent / "fixtures" / "sample.mp4"
 LIVE = os.environ.get("CLIP_SCANNER_LIVE") == "1" and bool(os.environ.get("ANTHROPIC_API_KEY"))
+# Scripted stand-in for taste: the payoff lines make a clip great, but a clip that opens on the slow
+# "so anyway chat" wind-up fails the hook gate, as the real panel is instructed to do.
 GREAT_RULES = {"great_phrases": ["oh my god", "never eating", "worst thing"], "great_score": 9.2,
-               "default_score": 6.2}
+               "default_score": 6.2, "hook_fail_openers": ["so anyway"]}
 
 
 def pick_asr() -> tuple[str, str]:
@@ -98,7 +100,8 @@ def test_report_and_great_clip(first, env):
     assert 0 < len(top["caption_title"].split()) <= 8
     assert top["hook_line"] and top["posting_hook_text"]
     md = next((env["tmp"] / "out").glob("*/report.md")).read_text()
-    assert "GREAT CLIP" in md and "Every rejected candidate" in md
+    assert "GREAT CLIP" in md
+    assert ("Every rejected candidate" in md) == bool(first["rejected"])  # --explain-rejects section
 
 
 def test_boundaries_never_cut_words(first, env):

@@ -9,6 +9,7 @@ key. Rules (JSON):
       "default_score": 6.0,
       "gate_failures": {"standalone": ["as i said"]},  # phrase -> that gate fails
       "devil_convincing_phrases": [],                    # phrase -> arbiter is convinced
+      "hook_fail_openers": ["so anyway"],                # clip OPENS with this -> hook gate fails
       "persona_offsets": {"jaded_scroller": -0.2}       # per-persona score tweak
     }
 """
@@ -16,13 +17,18 @@ key. Rules (JSON):
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .config import GATE_NAMES, RUBRIC_CRITERIA
 from .llm import ScriptFn
 
 DEFAULT_RULES = {"great_phrases": [], "great_score": 9.2, "default_score": 6.0, "gate_failures": {},
-                 "devil_convincing_phrases": [], "persona_offsets": {}}
+                 "devil_convincing_phrases": [], "hook_fail_openers": [], "persona_offsets": {}}
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
 
 
 def load_script(path: str | None) -> ScriptFn:
@@ -36,8 +42,8 @@ def make_script(rules: dict) -> ScriptFn:
     rules = {**DEFAULT_RULES, **rules}
 
     def has(text: str, phrases: list[str]) -> bool:
-        t = text.lower()
-        return any(p.lower() in t for p in phrases)
+        t = _norm(text)
+        return any(_norm(p) in t for p in phrases)
 
     def judge(meta: dict) -> dict:
         text = meta.get("clip_text", "")
@@ -46,6 +52,8 @@ def make_script(rules: dict) -> ScriptFn:
         gates = {}
         for g in GATE_NAMES:
             fail = has(text, rules["gate_failures"].get(g, []))
+            if g == "hook_in_first_2s" and any(_norm(text).startswith(_norm(o)) for o in rules["hook_fail_openers"]):
+                fail = True
             gates[g] = {"evidence": f"scripted: {'matched failure phrase' if fail else 'ok'}", "passed": not fail}
         scores = {c: {"justification": "scripted", "score": score} for c in RUBRIC_CRITERIA}
         great = score >= 8.5 and all(v["passed"] for v in gates.values())
