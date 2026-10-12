@@ -1,0 +1,69 @@
+from pathlib import Path
+
+from clip_scanner.calibrate import load_manifest, metrics, redecide, sweep, write_thresholds
+from clip_scanner.config import GATE_NAMES, RUBRIC_CRITERIA, Config, load_config
+from clip_scanner.judging.gates import GateResult
+from clip_scanner.judging.panel import JudgeOutcome, decide
+
+CFG = Config()
+DET = [GateResult("length", True, "ok")]
+RULING = {"argument_convincing": False, "survival_confidence": 8.0, "decisive_issue": ""}
+
+
+def judged(score: float):
+    v = {"first_two_seconds": "", "biggest_weakness": "", "overall_justification": "", "hook_line": "",
+         "overall": score, "verdict": "GREAT" if score >= 8.5 else "NOT_GREAT",
+         "gates": {g: {"evidence": "", "passed": True} for g in GATE_NAMES},
+         "scores": {c: {"justification": "", "score": score} for c in RUBRIC_CRITERIA}}
+    outs = [JudgeOutcome(p, verdict=v) for p in CFG.judging.judges]
+    return decide("c", DET, outs, RULING, {}, CFG)
+
+
+def test_redecide_matches_original_decision():
+    d = judged(9.0)
+    assert redecide(d, CFG).great == d.great
+
+
+def test_sweep_tightens_when_a_flop_passes():
+    # A flop scored 8.6 slips through the 8.5 bar; the hits score 9.0+.
+    labeled = [("hit", judged(9.0)), ("hit", judged(9.3)), ("flop", judged(8.6)), ("flop", judged(7.0))]
+    assert metrics([(lab, d.great) for lab, d in labeled])["fp"] == 1
+    rec = sweep(labeled, CFG)["recommended"]
+    assert rec["fp"] == 0 and rec["tp"] == 2
+    assert 8.6 < rec["overall_min"] <= 9.0
+
+
+def test_sweep_keeps_current_bar_when_it_already_separates():
+    labeled = [("hit", judged(9.0)), ("flop", judged(7.0))]
+    rec = sweep(labeled, CFG)["recommended"]
+    assert (rec["overall_min"], rec["rubric_mean_min"], rec["min_survival_confidence"]) == (8.5, 7.5, 7.0)
+
+
+def test_sweep_never_recommends_a_bar_that_passes_a_flop():
+    labeled = [("hit", judged(8.0)), ("flop", judged(8.0))]  # indistinguishable
+    out = sweep(labeled, CFG)
+    rec = out["recommended"]
+    assert rec is None or rec["fp"] == 0
+
+
+def test_manifest_labels_from_views(tmp_path):
+    (tmp_path / "manifest.toml").write_text(
+        '[[clip]]\nid="a"\nfile="hits/a.mp4"\nviews=5000000\n'
+        '[[clip]]\nid="b"\nfile="flops/b.mp4"\nviews=900\n'
+        '[[clip]]\nid="c"\nurl="https://example.com/c"\nviews=300000\n'
+        '[[clip]]\nid="d"\nfile="x.mp4"\nlabel="flop"\nviews=9999999\n')
+    entries = {e.id: e for e in load_manifest(tmp_path / "manifest.toml", CFG)}
+    assert entries["a"].label == "hit" and entries["b"].label == "flop"
+    assert entries["c"].label == "ambiguous" and entries["d"].label == "flop"
+
+
+def test_write_thresholds_preserves_comments(tmp_path):
+    src = Path(__file__).resolve().parents[1] / "config.toml"
+    dst = tmp_path / "config.toml"
+    dst.write_text(src.read_text())
+    write_thresholds(dst, {"overall_min": 8.75, "rubric_mean_min": 8.0, "min_survival_confidence": 6.0})
+    text = dst.read_text()
+    assert "EVERY judge's overall rating" in text
+    cfg = load_config(str(dst))
+    assert cfg.judging.overall_min == 8.75 and cfg.judging.rubric_mean_min == 8.0
+    assert cfg.devils_advocate.min_survival_confidence == 6.0

@@ -5,7 +5,11 @@ __pycache__/
 .cache/
 clip-scanner-output/
 /out/
-# calibration media is personal data; keep only the manifest + READMEs in git
-calibration/clips/**/*
-!calibration/clips/**/.gitkeep
-!calibration/clips/**/README.md
+# calibration media and results stay local; the manifest is versioned
+calibration/clips/**/*.mp4
+calibration/clips/**/*.mov
+calibration/clips/**/*.webm
+calibration/clips/**/*.mkv
+calibration/clips/**/*.m4a
+calibration/clips/**/*.part
+calibration/results/

@@ -1,0 +1,48 @@
+# Calibration set for `clip-scanner calibrate`.
+#
+# Add one [[clip]] per known short-form clip. Use clips that already ran on your account, or Joe's own
+# Shorts and TikToks, so the view counts are real. Each entry needs either:
+#   file = "hits/whatever.mp4"   (relative to calibration/clips/), or
+#   url  = "https://..."         (downloaded into calibration/clips/<label>s/ with `calibrate --fetch`)
+#
+# label = "hit" | "flop". If omitted, it comes from `views` using [calibration]
+# hit_min_views / flop_max_views in config.toml. Anything in between is "ambiguous" and is
+# reported but kept out of the precision numbers.
+#
+# Good calibration data:
+#   * at least 10 hits and 10 flops (more is better). Flops matter most, because they are what the bar must reject;
+#   * hits and flops of the SAME kinds of moments (two jumpscares: one that popped, one that died);
+#   * ideally the raw cut you posted (with captions is fine, since judges are told to ignore burned-in text);
+#   * the views at a comparable age (e.g. 7 days after posting).
+#
+# I could not verify per-clip view counts from the research environment (TikTok and YouTube were
+# not reachable), so the entries below are commented out. Check each one, fill in `views` from the
+# video page or your analytics, and uncomment it. Then add your own account's hits and, above all, its flops.
+
+# --- Candidates found during research (views unverified; fill in before use) ---
+
+# [[clip]]
+# id = "lettuce-taste"
+# url = "https://www.youtube.com/watch?v=G4VyKG6ivlI"   # "What's lettuce taste like?" (Reacts Day #502 moment)
+# views = 0
+# notes = "food verdict / absurd stream moment"
+
+# [[clip]]
+# id = "horror-chase"
+# url = "https://www.youtube.com/watch?v=IM-3j9W0K5g"   # "Average Joe Bart Horror Game" (clip channel short)
+# views = 0
+# notes = "horror reaction"
+
+# [[clip]]
+# id = "actually-insane"
+# url = "https://www.youtube.com/shorts/F5pABoUprek"   # "Joe Bartolozzi is actually insane... 🤮"
+# views = 0
+# notes = "disgust reaction"
+
+# --- Template ---
+# [[clip]]
+# id = "my-best-short"
+# file = "hits/my-best-short.mp4"
+# label = "hit"
+# views = 2400000
+# notes = "type-in-chat style confrontation, posted 2026-09-01, 7-day views"

@@ -40,7 +40,8 @@ ends (then it has no clear payoff).
 dead air, jump cuts.
 - Keyframes labelled with clip time.
 You cannot hear audio or see motion. The measured timeline is your ears. Do not assume anything the \
-transcript, timeline and frames do not support, and resolve missing or ambiguous evidence against the clip.
+transcript, timeline and frames do not support, and resolve missing or ambiguous evidence against the clip. \
+Ignore burned-in captions, watermarks or edit overlays from a previous editor; the account adds its own captions.
 
 ## Hard gates (one failure rejects the clip, whatever its scores)
 1. hook_in_first_2s: within the first 1.5-2 seconds there is a line, reaction or visual that stops a \

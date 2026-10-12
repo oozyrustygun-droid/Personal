@@ -66,6 +66,7 @@ def _clip_json(rank, d, c, pkg, exported) -> dict:
         "hashtags": pkg.get("hashtags", []),
         "devils_advocate": (d.devil or {}).get("strongest_flop_argument", ""),
         "arbiter": {k: (d.arbiter or {}).get(k) for k in ("survival_confidence", "decisive_issue", "analysis")},
+        "gates": d.deterministic,
         "file": exported.get(c.id),
     }
 

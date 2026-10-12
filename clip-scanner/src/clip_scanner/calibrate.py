@@ -1,12 +1,261 @@
-"""`clip-scanner calibrate` (implemented in phase 6)."""
+"""`clip-scanner calibrate`: measure the judges on known hits and flops, then tune the bar.
+
+Every calibration clip is judged as ONE candidate spanning the whole file, with the FULL panel
+(no short-circuit) plus the devil's advocate and arbiter. Raw verdicts are cached, so the
+threshold sweep afterwards is free. It re-applies the consensus rule under many candidate
+thresholds, keeps the combinations that reject every known flop, and among those with the best
+recall recommends the smallest change from the current bar (ties go to the stricter option,
+because a false positive costs more than a false negative).
+"""
 
 from __future__ import annotations
 
 import argparse
+import itertools
+import json
+import time
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
 
-from .ui import console
+import numpy as np
+
+from .cache import fingerprint, write_json
+from .candidates import Candidate
+from .config import REPO_ROOT, Config, load_config
+from .judging.gates import GateResult
+from .judging.panel import Decision, JudgeOutcome, decide
+from .ui import console, fmt_usd, stage
+
+SWEEP = {
+    "overall_min": [7.0, 7.5, 7.75, 8.0, 8.25, 8.5, 8.75, 9.0, 9.25, 9.5],
+    "rubric_mean_min": [6.5, 7.0, 7.5, 8.0, 8.5],
+    "min_survival_confidence": [5.0, 6.0, 7.0, 8.0],
+}
+
+
+@dataclass
+class Entry:
+    id: str
+    label: str            # hit | flop | ambiguous
+    views: int | None
+    file: Path | None
+    url: str
+    notes: str = ""
+
+
+def whole_clip_candidate(transcript, signals, duration: float, cfg: Config, signals_fp: str):
+    """A calibration clip is already a finished short: judge it exactly as posted."""
+    peak_i = int(np.argmax(signals.series["interest"])) if signals.series["interest"].size else 0
+    c = Candidate(id="c01", segments=[(0.0, round(duration, 3))], peak=round(peak_i * signals.hop, 2),
+                  origin="calibration", score=0.0, reason="whole calibration clip")
+    return [c], fingerprint("calibration-candidate", signals_fp, duration)
+
+
+def load_manifest(path: Path, cfg: Config) -> list[Entry]:
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    base = path.parent / "clips"
+    out = []
+    for i, d in enumerate(data.get("clip", []), 1):
+        views = d.get("views")
+        label = (d.get("label") or "").lower()
+        if label not in ("hit", "flop"):
+            if views is None:
+                label = "ambiguous"
+            elif views >= cfg.calibration.hit_min_views:
+                label = "hit"
+            elif views <= cfg.calibration.flop_max_views:
+                label = "flop"
+            else:
+                label = "ambiguous"
+        f = base / d["file"] if d.get("file") else None
+        out.append(Entry(id=d.get("id") or f"clip{i:02d}", label=label, views=views, file=f,
+                         url=d.get("url", ""), notes=d.get("notes", "")))
+    return out
+
+
+def fetch(entry: Entry, cfg: Config) -> Path | None:
+    from yt_dlp import YoutubeDL
+
+    target = entry.file or (Path("calibration/clips") / f"{entry.label}s" / f"{entry.id}.mp4")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "format": cfg.ingest.format,
+            "merge_output_format": "mp4", "outtmpl": str(target.with_suffix(".%(ext)s"))}
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(entry.url, download=True)
+        got = Path(ydl.prepare_filename(info))
+    final = got if got.exists() else next(target.parent.glob(f"{target.stem}.*"), None)
+    return final
+
+
+def redecide(d: Decision, cfg: Config) -> Decision:
+    """Re-apply the consensus rule to cached raw verdicts under a different config."""
+    det = [GateResult(**g) for g in d.deterministic]
+    outcomes = [JudgeOutcome(**{k: v for k, v in j.items()}) for j in d.judges]
+    return decide(d.candidate_id, det, outcomes or None, d.arbiter, d.devil, cfg)
+
+
+def variant(cfg: Config, overall: float, rubric: float, survival: float) -> Config:
+    data = cfg.model_dump(exclude={"source_path"})
+    data["judging"]["overall_min"] = overall
+    data["judging"]["rubric_mean_min"] = rubric
+    data["devils_advocate"]["min_survival_confidence"] = survival
+    return Config.model_validate(data)
+
+
+def metrics(rows: list[tuple[str, bool]]) -> dict:
+    tp = sum(1 for lab, g in rows if lab == "hit" and g)
+    fp = sum(1 for lab, g in rows if lab == "flop" and g)
+    fn = sum(1 for lab, g in rows if lab == "hit" and not g)
+    tn = sum(1 for lab, g in rows if lab == "flop" and not g)
+    return {"tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": tp / (tp + fp) if tp + fp else None,
+            "recall": tp / (tp + fn) if tp + fn else None,
+            "flop_pass_rate": fp / (fp + tn) if fp + tn else None}
+
+
+def sweep(labeled: list[tuple[str, Decision]], cfg: Config) -> dict:
+    results = []
+    for o, r, s in itertools.product(SWEEP["overall_min"], SWEEP["rubric_mean_min"], SWEEP["min_survival_confidence"]):
+        v = variant(cfg, o, r, s)
+        rows = [(lab, redecide(d, v).great) for lab, d in labeled]
+        results.append({"overall_min": o, "rubric_mean_min": r, "min_survival_confidence": s, **metrics(rows)})
+    safe = [x for x in results if x["fp"] == 0]
+    if not safe:
+        return {"grid": results, "recommended": None,
+                "note": "No threshold combination rejects every known flop. The judges cannot separate your "
+                        "flops from your hits; add more examples or revise the style guide."}
+    best_tp = max(x["tp"] for x in safe)
+    tied = [x for x in safe if x["tp"] == best_tp]
+    # Smallest move from the current bar that rejects every known flop and keeps the most hits.
+    # Small calibration sets overfit easily, so don't move thresholds the data doesn't demand.
+    # Ties go to the stricter option.
+    cur = (cfg.judging.overall_min, cfg.judging.rubric_mean_min, cfg.devils_advocate.min_survival_confidence)
+
+    def distance(x):
+        return (abs(x["overall_min"] - cur[0]) / 0.25 + abs(x["rubric_mean_min"] - cur[1]) / 0.5
+                + abs(x["min_survival_confidence"] - cur[2]) / 1.0)
+
+    rec = min(tied, key=lambda x: (distance(x), -x["overall_min"], -x["rubric_mean_min"],
+                                   -x["min_survival_confidence"]))
+    return {"grid": results, "recommended": rec, "note": ""}
+
+
+def write_thresholds(path: Path, rec: dict) -> None:
+    import tomlkit
+
+    doc = tomlkit.parse(path.read_text(encoding="utf-8")) if path.exists() else tomlkit.document()
+    doc.setdefault("judging", tomlkit.table())
+    doc.setdefault("devils_advocate", tomlkit.table())
+    doc["judging"]["overall_min"] = rec["overall_min"]
+    doc["judging"]["rubric_mean_min"] = rec["rubric_mean_min"]
+    doc["devils_advocate"]["min_survival_confidence"] = rec["min_survival_confidence"]
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 def run_calibrate(args: argparse.Namespace) -> int:
-    console.print("[yellow]calibrate is not implemented yet[/yellow]")
-    return 2
+    from .judging.runner import build_context, judge_candidate
+    from .judging.gates import clip_measurements, deterministic_gates
+    from .pipeline import analyze
+
+    cfg = load_config(args.config)
+    manifest = Path(args.manifest or cfg.calibration.manifest)
+    if not manifest.is_absolute() and not manifest.exists():
+        manifest = REPO_ROOT / manifest
+    if not manifest.exists():
+        console.print(f"[red]manifest not found: {manifest}[/red]")
+        return 2
+    entries = load_manifest(manifest, cfg)
+    if args.only:
+        entries = [e for e in entries if e.id in set(args.only)]
+    ready: list[tuple[Entry, Path]] = []
+    for e in entries:
+        path = e.file if e.file and e.file.exists() else None
+        if path is None and e.url and args.fetch:
+            try:
+                path = fetch(e, cfg)
+            except Exception as ex:  # one bad URL shouldn't stop the run
+                console.print(f"[yellow]{e.id}: download failed ({ex})[/yellow]")
+        if path is None:
+            console.print(f"[yellow]{e.id}: no local file{' (pass --fetch to download it)' if e.url else ''}; skipped[/yellow]")
+            continue
+        ready.append((e, path))
+    hits = sum(1 for e, _ in ready if e.label == "hit")
+    flops = sum(1 for e, _ in ready if e.label == "flop")
+    console.print(f"[bold]Calibration set:[/bold] {hits} hits, {flops} flops, "
+                  f"{len(ready) - hits - flops} ambiguous (excluded from metrics)")
+    if hits < 5 or flops < 5:
+        console.print("[yellow]Fewer than 5 hits or 5 flops: the threshold suggestion will be noisy. "
+                      "Add more labelled examples to calibration/manifest.toml.[/yellow]")
+    if not ready:
+        return 2
+
+    analyses = []
+    for e, path in ready:
+        console.rule(f"{e.id} ({e.label}{f', {e.views:,} views' if e.views else ''})")
+        analyses.append((e, analyze(str(path), cfg, judge_backend=args.judge_backend,
+                                    scripted_judge=args.scripted_judge, single_window=True, quiet=True)))
+
+    calls_per_clip = len(cfg.judging.judges) + (2 if cfg.devils_advocate.enabled else 0)
+    price = cfg.price(cfg.judging.model)
+    est = len(analyses) * calls_per_clip * (8000 * price.input + 4000 * price.output) / 1e6
+    console.print(f"Judging {len(analyses)} clips with the full panel: up to {len(analyses) * calls_per_clip} calls, "
+                  f"estimated {fmt_usd(est)} (cached clips are free).")
+    if est > cfg.judging.confirm_above_usd and not args.yes:
+        if console.input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            return 1
+
+    labeled: list[tuple[str, Decision]] = []
+    table = []
+    total_cost = 0.0
+    with stage("Judging calibration clips"):
+        for e, a in analyses:
+            ctx = build_context(cfg, a.llm, a.transcript, a.signals, a.frames, a.meta.title, a.meta.uploader,
+                                a.meta.duration)
+            c = a.candidates[0]
+            det = deterministic_gates(c, a.transcript, a.signals, cfg)
+            d = judge_candidate(c, det, clip_measurements(c, a.transcript, a.signals), ctx, full_panel=True)
+            total_cost += a.tracker.total()
+            if e.label in ("hit", "flop"):
+                labeled.append((e.label, d))
+            correct = (e.label == "hit") == d.great if e.label in ("hit", "flop") else None
+            table.append({"id": e.id, "label": e.label, "views": e.views, "great": d.great, "stage": d.stage,
+                          "min_effective": d.min_effective, "correct": correct,
+                          "reason": d.reasons[0] if d.reasons else "", "decision": d.to_json()})
+            mark = "" if correct is None else ("[green]✓[/green]" if correct else "[red]✗[/red]")
+            console.print(f"  {mark} {e.id:<24} {e.label:<9} → {'GREAT' if d.great else 'not great':<9} "
+                          f"[dim]{d.min_effective if d.min_effective is not None else '–'} "
+                          f"{d.reasons[0] if d.reasons else ''}[/dim]")
+
+    current = metrics([(lab, d.great) for lab, d in labeled])
+    sw = sweep(labeled, cfg)
+    hit_scores = [r["min_effective"] for r in table if r["label"] == "hit" and r["min_effective"] is not None]
+    flop_scores = [r["min_effective"] for r in table if r["label"] == "flop" and r["min_effective"] is not None]
+    console.print()
+    def pct(x):
+        return "n/a" if x is None else f"{x:.0%}"
+
+    console.print(f"[bold]At the current bar[/bold] (overall ≥ {cfg.judging.overall_min}, rubric ≥ "
+                  f"{cfg.judging.rubric_mean_min}, survival ≥ {cfg.devils_advocate.min_survival_confidence}): "
+                  f"precision {pct(current['precision'])} · recall {pct(current['recall'])} · "
+                  f"flops passed {current['fp']}/{current['fp'] + current['tn']}")
+    if hit_scores and flop_scores:
+        console.print(f"Score separation: lowest hit {min(hit_scores):.2f} vs highest flop {max(flop_scores):.2f}")
+    rec = sw["recommended"]
+    if rec:
+        console.print(f"[bold]Recommended bar[/bold]: overall_min={rec['overall_min']}, "
+                      f"rubric_mean_min={rec['rubric_mean_min']}, "
+                      f"min_survival_confidence={rec['min_survival_confidence']} → recall {pct(rec['recall'])} "
+                      f"with 0 known flops passing")
+    else:
+        console.print(f"[red]{sw['note']}[/red]")
+
+    out_dir = manifest.parent / "results" / time.strftime("%Y%m%d-%H%M%S")
+    write_json(out_dir / "calibration.json", {"current": current, "recommended": rec, "note": sw["note"],
+                                              "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})
+    console.print(f"[dim]details: {out_dir / 'calibration.json'} · API cost this run {fmt_usd(total_cost)}[/dim]")
+    if args.write_config and rec:
+        path = Path(cfg.source_path) if cfg.source_path else Path("config.toml")
+        write_thresholds(path, rec)
+        console.print(f"[green]wrote recommended thresholds to {path}[/green]")
+    return 0
