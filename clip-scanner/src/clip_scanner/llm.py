@@ -167,6 +167,8 @@ class LLM:
         if self.backend == "scripted":
             rh = self.scripted_hash(purpose, meta or {}, rh)
         hit = None if self.refresh else self.cached_result(purpose, rh)
+        if hit is not None and "error" in hit and self.backend == "claude-code":
+            hit = None  # failures are never cached on the subscription (older builds did): ask again
         if hit is not None:
             usages = [Usage.from_json(u) for u in hit.get("usages", [])]
             self.tracker.record(purpose, usages, cached=True)

@@ -490,3 +490,63 @@ def test_proposer_retries_claude_code_schema_failures(fake, tmp_path):
     words = [Word(round(i * 0.4, 2), round(i * 0.4 + 0.3, 2), f"word{i % 7}") for i in range(1500)]
     moments, complete = propose(llm, Transcript(words=words), 600.0, llm.cfg)
     assert not complete and moments == []         # not cached, not deterministic: retry next run
+
+
+def test_simultaneous_stops_merge_and_never_corrupt_the_file(tmp_path):
+    import threading
+    import time
+
+    from clip_scanner import claude_code as cc
+
+    f = tmp_path / "cache" / "claude-plan-stop.json"
+    far = time.time() + 3 * 86400
+    jobs = [("extra_usage", far), ("usage_limit", time.time() + 600)] * 8
+    barrier = threading.Barrier(len(jobs))
+
+    def hit(kind, until):
+        barrier.wait()
+        cc.set_plan_stop(kind, f"{kind} message", until, f)
+
+    threads = [threading.Thread(target=hit, args=j) for j in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    saved = json.loads(f.read_text())                       # always valid JSON
+    assert saved["kind"] == "extra_usage" and saved["until"] == far
+    assert not list(f.parent.glob("*.tmp"))
+    stop = cc.plan_stop(f)
+    assert stop.kind == "extra_usage" and str(f) in str(stop)  # the delete hint survives the race
+
+
+def test_unreadable_stop_file_still_stops(tmp_path):
+    import os
+    import time
+
+    from clip_scanner import claude_code as cc
+
+    f = tmp_path / "claude-plan-stop.json"
+    f.write_text('{"kind": "extra_usage", "until": 9}}')      # damaged
+    assert cc.plan_stop(f) is not None                        # fail closed
+    old = time.time() - cc.DEFAULT_STOP_S - 10
+    os.utime(f, (old, old))
+    assert cc.plan_stop(f) is None and not f.exists()          # ...but not forever
+
+
+def test_bad_answers_are_asked_again_on_the_subscription(fake, tmp_path):
+    RESP = dict(RESPONSES, reason={"reason": "ok", "score": 70})   # outside 0-10: pydantic rejects it
+    (fake.tmp / "responses.json").write_text(json.dumps(RESP))
+    llm, _ = make_llm(fake, tmp_path)
+    for _ in range(2):
+        with pytest.raises(LLMError) as e:
+            call(llm)
+        assert e.value.kind == "schema" and not e.value.cached
+    assert len(fake.calls()) == 2                                # asked again, not replayed
+
+
+def test_stale_cached_failures_from_older_builds_are_ignored(fake, tmp_path):
+    llm, _ = make_llm(fake, tmp_path)
+    call(llm)                                                    # learn the request hash's cache path
+    [entry] = list((tmp_path / "llm" / "judge").glob("*.json"))
+    entry.write_text(json.dumps({"error": {"kind": "schema", "message": "old"}, "usages": []}))
+    assert call(llm).data["score"] == 7.0 and len(fake.calls()) == 2

@@ -75,6 +75,7 @@ PLAN_KINDS = ("usage_limit", "extra_usage")
 # -- process-wide plan stop and live runs ---------------------------------------------------------
 
 _lock = threading.Lock()
+_stop_write_lock = threading.Lock()  # serializes set_plan_stop (never taken inside _lock)
 _live: set[subprocess.Popen] = set()
 _stop: dict | None = None  # {"kind", "message", "until"}; shared by every LLM in this process
 
@@ -100,33 +101,51 @@ def _read_stop_file(state_file: Path) -> dict | None:
 
 def set_plan_stop(kind: str, message: str, until: float, state_file: Path | None = None) -> None:
     """Record a plan stop that every later request honours, remember it on disk (so a new process
-    doesn't spend one more paid call to rediscover it), then kill the live runs. A repeat of the same
-    kind never shortens an existing stop."""
+    doesn't spend one more paid call to rediscover it), then kill the live runs.
+
+    Several runs can hit the limit at once, so the read-merge-write is serialized and never shortens
+    a stop: the latest reset wins, and an extra-usage stop is never downgraded to a usage-limit one."""
     global _stop
-    with _lock:
-        prev = _stop if _stop and _stop.get("kind") == kind else None
-    disk = _read_stop_file(state_file) if state_file is not None and state_file.exists() else None
-    if disk and disk.get("kind") != kind:
-        disk = None
-    until = max([until] + [e["until"] for e in (prev, disk) if e and isinstance(e.get("until"), (int, float))])
-    entry = {"kind": kind, "message": message, "until": until,
-             "file": str(state_file) if state_file is not None else None}
-    if state_file is not None:  # before the kill, so the killed runs find it
-        try:
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(entry), encoding="utf-8")
-            tmp.replace(state_file)
-        except OSError:
-            entry["file"] = None
-    with _lock:
-        _stop = entry
+    with _stop_write_lock:
+        with _lock:
+            existing = [e for e in (_stop,) if e]
+        if state_file is not None and state_file.exists():
+            disk = _read_stop_file(state_file)
+            if disk is None:  # unreadable: assume the worst rather than forget it
+                disk = {"kind": "extra_usage", "until": _mtime(state_file) + DEFAULT_STOP_S, "message": message}
+            existing.append(disk)
+        untils = [until] + [e["until"] for e in existing if isinstance(e.get("until"), (int, float))]
+        kinds = {kind} | {e.get("kind") for e in existing}
+        entry = {"kind": "extra_usage" if "extra_usage" in kinds else kind,
+                 "message": next((e.get("message") for e in existing if e.get("kind") == "extra_usage"
+                                  and kind != "extra_usage"), None) or message,
+                 "until": max(untils), "file": str(state_file) if state_file is not None else None}
+        if state_file is not None:  # before the kill, so the killed runs find it
+            try:
+                state_file.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=state_file.parent, prefix=".plan-stop-", suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                os.replace(tmp, state_file)
+            except OSError:
+                if not state_file.exists():
+                    entry["file"] = None
+        with _lock:
+            _stop = entry
     stop_all_runs()
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return time.time()
 
 
 def plan_stop(state_file: Path | None = None) -> ClaudeCodeError | None:
     """The active stop, if any (in memory, else from the state file). Expired stops are cleared, and
-    deleting the state file lifts a stop at once (the documented way to retry sooner)."""
+    deleting the state file lifts a stop at once (the documented way to retry sooner). A state file
+    that can't be read counts as a stop (fail closed) for DEFAULT_STOP_S after it was written."""
     global _stop
     now = time.time()
     with _lock:
@@ -135,12 +154,18 @@ def plan_stop(state_file: Path | None = None) -> ClaudeCodeError | None:
             _stop = entry = None
     if entry is None and state_file is not None and state_file.exists():
         entry = _read_stop_file(state_file)
-        if entry is None or not isinstance(entry.get("until"), (int, float)) or now >= entry["until"]:
+        if entry is None or not isinstance(entry.get("until"), (int, float)):
+            entry = {"kind": "extra_usage", "until": _mtime(state_file) + DEFAULT_STOP_S,
+                     "message": "an earlier scan stopped for a plan limit or paid extra usage, and its record "
+                                "couldn't be read", "file": str(state_file)}
+        if now >= entry["until"]:
             try:
                 state_file.unlink()
             except OSError:
                 pass
             entry = None
+        else:
+            entry.setdefault("file", str(state_file))
     if not entry:
         return None
     msg = entry.get("message", "judging is paused")
