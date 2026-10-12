@@ -43,6 +43,7 @@ class LLMResult:
     cached: bool
     served_model: str
     request_hash: str
+    fallback_used: bool = False  # True if a model other than the requested one produced the answer
 
 
 ScriptFn = Callable[[str, dict], dict]
@@ -72,6 +73,11 @@ def strict_schema(model: type[BaseModel]) -> dict:
         return node
 
     return walk(schema)
+
+
+def _same_model(served: str | None, requested: str) -> bool:
+    """The API may report a dated snapshot id for the requested alias; anything else is a different model."""
+    return bool(served) and (served == requested or served.startswith(requested + "-"))
 
 
 def _hash_request(payload: dict) -> str:
@@ -111,19 +117,27 @@ class LLM:
                 return None
         return None
 
+    def use_fallbacks(self, model: str, allow_fallback: bool) -> bool:
+        return allow_fallback and self.cfg.judging.server_fallbacks and model in FALLBACK_MODELS
+
     def request_hash(self, *, model: str, system: list[dict], messages: list[dict], schema: dict,
-                     effort: str) -> str:
+                     effort: str, fallbacks: bool = False) -> str:
         return _hash_request({"backend": self.backend, "model": model, "system": system, "messages": messages,
-                              "schema": schema, "effort": effort})
+                              "schema": schema, "effort": effort, "fallbacks": fallbacks})
 
     def scripted_hash(self, purpose: str, meta: dict, rh: str) -> str:
         return _hash_request({"scripted": meta, "purpose": purpose, "h": rh,
                               "rules": getattr(self.script, "fingerprint", "")})
 
     def call(self, *, purpose: str, model: str, system: list[dict], messages: list[dict],
-             output: type[BaseModel], effort: str, max_tokens: int, meta: dict | None = None) -> LLMResult:
+             output: type[BaseModel], effort: str, max_tokens: int, meta: dict | None = None,
+             allow_fallback: bool = False) -> LLMResult:
+        """allow_fallback: let the API re-run a refused request on another model. Never set it for
+        verdicts. A substitute model's opinion is not the configured judge's opinion."""
         schema = strict_schema(output)
-        rh = self.request_hash(model=model, system=system, messages=messages, schema=schema, effort=effort)
+        fallbacks = self.use_fallbacks(model, allow_fallback)
+        rh = self.request_hash(model=model, system=system, messages=messages, schema=schema, effort=effort,
+                               fallbacks=fallbacks)
         if self.backend == "scripted":
             rh = self.scripted_hash(purpose, meta or {}, rh)
         hit = None if self.refresh else self.cached_result(purpose, rh)
@@ -132,8 +146,10 @@ class LLM:
             self.tracker.record(purpose, usages, cached=True)
             if "error" in hit:
                 raise LLMError(hit["error"]["kind"], hit["error"]["message"] + " (cached)")
+            served = hit.get("served_model", model)
             return LLMResult(data=self._validate(output, hit["data"]), usages=usages, cached=True,
-                             served_model=hit.get("served_model", model), request_hash=rh)
+                             served_model=served, request_hash=rh,
+                             fallback_used=hit.get("fallback_used", not _same_model(served, model)))
 
         if self.backend == "scripted":
             if self.script is None:
@@ -143,13 +159,17 @@ class LLM:
             served = model
         else:
             data, usages, served = self._anthropic(model=model, system=system, messages=messages, schema=schema,
-                                                   effort=effort, max_tokens=max_tokens, purpose=purpose, rh=rh)
+                                                   effort=effort, max_tokens=max_tokens, purpose=purpose, rh=rh,
+                                                   fallbacks=fallbacks)
         self.tracker.record(purpose, usages, cached=False)
         validated = self._validate(output, data, purpose=purpose, rh=rh, usages=usages)
+        fallback_used = not _same_model(served, model) or any(u.model and not _same_model(u.model, model)
+                                                               for u in usages[1:])
         write_json(self.store_dir / purpose / f"{rh}.json",
                    {"data": data, "usages": [u.to_json() for u in usages], "served_model": served,
-                    "requested_model": model})
-        return LLMResult(data=validated, usages=usages, cached=False, served_model=served, request_hash=rh)
+                    "requested_model": model, "fallback_used": fallback_used})
+        return LLMResult(data=validated, usages=usages, cached=False, served_model=served, request_hash=rh,
+                         fallback_used=fallback_used)
 
     def _validate(self, output: type[BaseModel], data: dict, *, purpose: str = "", rh: str = "",
                   usages: list[Usage] | None = None) -> dict:
@@ -166,7 +186,7 @@ class LLM:
                    {"error": {"kind": kind, "message": message}, "usages": [u.to_json() for u in usages]})
 
     def _anthropic(self, *, model: str, system: list[dict], messages: list[dict], schema: dict, effort: str,
-                   max_tokens: int, purpose: str, rh: str) -> tuple[dict, list[Usage], str]:
+                   max_tokens: int, purpose: str, rh: str, fallbacks: bool) -> tuple[dict, list[Usage], str]:
         import anthropic
 
         kwargs: dict[str, Any] = dict(
@@ -175,7 +195,7 @@ class LLM:
             output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
         )
         try:
-            if self.cfg.judging.server_fallbacks and model in FALLBACK_MODELS:
+            if fallbacks:
                 resp = self.client.beta.messages.create(**kwargs, betas=[FALLBACK_BETA], fallbacks="default")
             else:
                 resp = self.client.messages.create(**kwargs)
@@ -193,7 +213,17 @@ class LLM:
             raise LLMError("api", f"{e.status_code}: {str(e)[:300]}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError("connection", str(e)[:300]) from e
+        except anthropic.AnthropicError as e:  # anything else from the SDK: fail closed, never crash the run
+            raise LLMError("api", f"{type(e).__name__}: {str(e)[:300]}") from e
 
+        try:
+            return self._parse_response(resp, model, purpose, rh)
+        except LLMError:
+            raise
+        except (AttributeError, TypeError, KeyError, ValueError) as e:  # malformed response: fail closed
+            raise LLMError("malformed_response", f"{type(e).__name__}: {str(e)[:200]}") from e
+
+    def _parse_response(self, resp, model: str, purpose: str, rh: str) -> tuple[dict, list[Usage], str]:
         usages = usages_from_response(resp, model)
         served = getattr(resp, "model", model) or model
         if resp.stop_reason == "refusal":

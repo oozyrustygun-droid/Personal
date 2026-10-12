@@ -26,7 +26,8 @@ class GateResult:
         return asdict(self)
 
 
-def clip_measurements(c: Candidate, transcript: Transcript, sig: Signals) -> dict:
+def clip_measurements(c: Candidate, transcript: Transcript, sig: Signals, music_prob: float = 0.5,
+                      raw: bool = False) -> dict:
     """Facts about the clip as exported (clip time = seconds from clip start, pre-roll excluded)."""
     words = c.words(transcript)
     first_word = c.to_content(words[0].start) if words else None
@@ -56,22 +57,26 @@ def clip_measurements(c: Candidate, transcript: Transcript, sig: Signals) -> dic
     music_frac = 0.0
     if sig.events_available:
         total = sum(e - s for s, e in c.segments)
-        music_frac = sum(sig.frac_above("music", 0.5, s, e) * (e - s) for s, e in c.segments) / max(total, 1e-6)
-    return {
-        "duration": round(c.duration, 2),
-        "first_word_at": None if first_word is None else round(first_word, 2),
-        "first_activity_at": None if onset is None else round(onset, 2),
-        "longest_dead_air": round(longest, 2),
-        "music_fraction": round(music_frac, 3),
+        music_frac = (sum(sig.frac_above("music", music_prob, s, e) * (e - s) for s, e in c.segments)
+                      / max(total, 1e-6))
+    m = {
+        "duration": c.duration,
+        "first_word_at": first_word,
+        "first_activity_at": onset,
+        "longest_dead_air": longest,
+        "music_fraction": music_frac,
         "word_count": len(words),
         "jump_cuts": c.jump_cuts,
-        "removed_gaps_s": round(sum(b - a for a, b in c.removed_gaps), 2),
+        "removed_gaps_s": sum(b - a for a, b in c.removed_gaps),
     }
+    if raw:  # gates compare unrounded values; rounding is for display only
+        return m
+    return {k: (round(v, 3) if isinstance(v, float) else v) for k, v in m.items()}
 
 
 def deterministic_gates(c: Candidate, transcript: Transcript, sig: Signals, cfg: Config) -> list[GateResult]:
     g = cfg.gates
-    m = clip_measurements(c, transcript, sig)
+    m = clip_measurements(c, transcript, sig, g.music_prob, raw=True)
     out: list[GateResult] = []
     out.append(GateResult("length", g.min_len_s <= m["duration"] <= g.max_len_s,
                           f"{m['duration']:.1f}s (allowed {g.min_len_s:.0f}-{g.max_len_s:.0f}s)", m["duration"]))
@@ -86,11 +91,14 @@ def deterministic_gates(c: Candidate, transcript: Transcript, sig: Signals, cfg:
                           m["longest_dead_air"]))
     if sig.events_available:
         out.append(GateResult("music_bed", m["music_fraction"] <= g.music_bed_max_fraction,
-                              f"music detected in {m['music_fraction']:.0%} of the clip "
+                              f"music (score >= {g.music_prob:.2f}) in {m['music_fraction']:.0%} of the clip "
                               f"(max {g.music_bed_max_fraction:.0%})", m["music_fraction"]))
     else:
-        out.append(GateResult("music_bed", True, "not measured (audio-event model unavailable); judges check it",
-                              None))
+        # The judges can't hear audio, so an unmeasured music bed can't be ruled out: fail closed
+        # unless the user explicitly opted out with gates.require_music_check = false.
+        out.append(GateResult("music_bed", not g.require_music_check,
+                              "music not measured (audio-event model unavailable)"
+                              + ("" if g.require_music_check else "; check disabled in config"), None))
     if m["word_count"] == 0:
         out.append(GateResult("has_speech", False, "no transcribed speech in the clip", 0.0))
     return out

@@ -93,10 +93,10 @@ def smooth_path(times: list[float], xs: list[float | None], crop_frac: float, cf
 
 
 def crop_path(src: Path, segments: list[tuple[float, float]], src_w: int, src_h: int, crop_w: int,
-              cfg: Config) -> list[tuple[float, int]]:
+              cfg: Config, fps: float | None = None) -> list[tuple[float, int]]:
     """[(output_time, crop_x_pixels)] for the concatenated segments."""
     crop_frac = crop_w / src_w
-    fps = cfg.export.face_sample_fps
+    fps = fps or cfg.export.face_sample_fps
     out_times: list[float] = []
     raw: list[float | None] = []
     offset = 0.0

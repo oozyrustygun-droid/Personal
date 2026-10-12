@@ -16,12 +16,16 @@ performance you already know.
    precision, recall, the share of known flops that would have passed, and the score gap between
    your weakest hit and your strongest flop.
 3. It then sweeps `overall_min`, `rubric_mean_min` and `min_survival_confidence` over the cached
-   verdicts (no extra API calls) and recommends the **loosest bar that still rejects every known
-   flop**. Among equally good options it picks the strictest. Apply it with:
+   verdicts (no extra API calls). Among the bars that reject every known flop and keep the most hits,
+   it recommends the **smallest change from your current bar** (ties go to the stricter option). Apply it with:
 
    ```bash
    uv run clip-scanner calibrate --write-config
    ```
+
+   Safety rails: it refuses with fewer than 10 labelled hits **and** 10 flops (a bar tuned on less
+   overfits). It never lowers a threshold unless you add `--allow-loosen`, and it never writes from the
+   offline test judge.
 
 Results (per-clip verdicts, the full threshold grid and cost) are written to
 `calibration/results/<timestamp>/calibration.json`. Media and results stay out of git.

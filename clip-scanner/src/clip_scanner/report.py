@@ -19,13 +19,35 @@ STAGE_LABEL = {"deterministic_gates": "hard gate (measured)", "panel": "judging 
                "devils_advocate": "devil's advocate", "error": "judging error", "great": "GREAT"}
 
 
-def out_dir_for(a, cfg: Config) -> Path:
+SCRIPTED_BANNER = "SCRIPTED TEST JUDGE, NOT REAL JUDGING"
+
+
+def out_dir_for(a, cfg: Config, scripted: bool = False) -> Path:
     from .export import slug
 
-    return cfg.output_dir / f"{slug(a.meta.title, 50)}-{a.meta.video_id[-10:]}"
+    # Offline test runs never write into the real output folder.
+    suffix = "-SCRIPTED-TEST" if scripted else ""
+    return cfg.output_dir / f"{slug(a.meta.title, 50)}-{a.meta.video_id[-10:]}{suffix}"
 
 
-def verdict_label(result) -> str:
+def write_in_progress(a, cfg: Config, out: Path, scripted: bool = False) -> None:
+    """Placeholder written before judging, so an interrupted run never leaves an old verdict looking current."""
+    out.mkdir(parents=True, exist_ok=True)
+    msg = ("IN PROGRESS: a scan of this video started and has not finished. If you are reading this, it "
+           "was interrupted or crashed; earlier results are invalid until a run completes.")
+    write_json(out / "report.json", {"status": "in_progress", "verdict": "IN PROGRESS / INTERRUPTED",
+                                     "video": {"id": a.meta.video_id, "title": a.meta.title},
+                                     "judge_backend": "scripted" if scripted else "anthropic",
+                                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    (out / "report.md").write_text(f"# clip-scanner report: {a.meta.title}\n\n**{msg}**\n", encoding="utf-8")
+
+
+def verdict_label(result, scripted: bool = False) -> str:
+    base = _verdict_label(result)
+    return f"[{SCRIPTED_BANNER}] {base}" if scripted else base
+
+
+def _verdict_label(result) -> str:
     if result.great:
         n = len(result.great)
         return f"{n} GREAT CLIP{'S' if n > 1 else ''}"
@@ -37,10 +59,12 @@ def verdict_label(result) -> str:
 
 
 def _judge_rows(d) -> list[dict]:
+    served = {j["persona"]: j.get("served_model", "") for j in d.judges}
     rows = []
     for a in d.assessments:
         rows.append({"judge": a["persona"], "overall": a["overall"], "rubric_mean": a["rubric_mean"],
-                     "effective": a["effective"], "failed_gates": a["failed_gates"], "ok": a["ok"]})
+                     "effective": a["effective"], "failed_gates": a["failed_gates"], "ok": a["ok"],
+                     "served_model": served.get(a["persona"], "")})
     return rows
 
 
@@ -81,7 +105,7 @@ def _reject_json(d, c) -> dict:
             "arbiter_confidence": (d.arbiter or {}).get("survival_confidence")}
 
 
-def build_report(a, result, cfg: Config, exported: dict | None = None) -> dict:
+def build_report(a, result, cfg: Config, exported: dict | None = None, scripted: bool = False) -> dict:
     exported = exported or {}
     by_id = {c.id: c for c in a.candidates}
     great_ids = {d.candidate_id for d in result.great}
@@ -93,8 +117,9 @@ def build_report(a, result, cfg: Config, exported: dict | None = None) -> dict:
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "video": {"id": a.meta.video_id, "title": a.meta.title, "source": a.meta.source, "url": a.meta.url,
                   "uploader": a.meta.uploader, "duration": round(a.meta.duration, 1)},
-        "verdict": verdict_label(result),
+        "verdict": verdict_label(result, scripted),
         "status": result.status,
+        "judge_backend": "scripted" if scripted else "anthropic",
         "bar": {"judges": j.judges, "model": j.model, "effort": j.effort, "overall_min": j.overall_min,
                 "rubric_mean_min": j.rubric_mean_min, "criterion_floors": j.criterion_floors,
                 "gate_policy": j.gate_policy, "devils_advocate": cfg.devils_advocate.enabled,
@@ -124,6 +149,9 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
          f"{'on' if b['devils_advocate'] else 'off'} · {b['model']} @ {b['effort']}",
          f"- Generated {rep['generated_at']} by {rep['tool']}", "",
          f"## Verdict: {'✅' if rep['great_clips'] else '❌'} {rep['verdict']}", ""]
+    if rep.get("judge_backend") == "scripted":
+        L += [f"> 🧪 **{SCRIPTED_BANNER}.** These verdicts come from the offline test script, not Claude. "
+              "Do not post anything based on this report.", ""]
     if rep["diagnosis"]:
         L += [f"> {rep['diagnosis']}", ""]
     for n in rep["notes"] + rep["signals_notes"]:
@@ -171,10 +199,10 @@ def _md(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def write_reports(a, result, cfg: Config, *, explain_rejects: bool = False, exported: dict | None = None) -> dict:
-    out = out_dir_for(a, cfg)
+def write_reports(a, result, cfg: Config, out: Path, *, explain_rejects: bool = False, exported: dict | None = None,
+                  scripted: bool = False) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    rep = build_report(a, result, cfg, exported)
+    rep = build_report(a, result, cfg, exported, scripted)
     write_json(out / "report.json", rep)
     (out / "report.md").write_text(render_markdown(rep, explain_rejects), encoding="utf-8")
     return {"dir": out, "md": out / "report.md", "json": out / "report.json", "report": rep}

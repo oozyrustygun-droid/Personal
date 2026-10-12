@@ -186,3 +186,17 @@ def tighten(start: float, end: float, dead_runs: Sequence[tuple[float, float]], 
     if end > cur:
         segments.append((cur, end))
     return [(round(a, 3), round(b, 3)) for a, b in segments if b - a > 0.05]
+
+
+def apply_preroll(segments: list[tuple[float, float]], words: Sequence[Word], cuts: Sequence[float],
+                  preroll: float) -> list[tuple[float, float]]:
+    """Prepend up to `preroll` seconds to the first segment. It is clamped so it never includes the tail
+    of the previous word (the clip would open mid-word) or reaches back across a scene cut (it would
+    open on a flash of the previous shot). Applied BEFORE judging, so the judged clip is the posted clip."""
+    if not segments or preroll <= 0:
+        return list(segments)
+    s0, e0 = segments[0]
+    prev_end = max((w.end for w in words if w.end <= s0 + EPS), default=0.0)
+    last_cut = max((float(c) for c in cuts if c <= s0 + EPS), default=0.0)
+    pre = max(0.0, min(preroll, s0 - prev_end - 0.02, s0 - last_cut, s0))
+    return [(round(s0 - pre, 3), e0)] + list(segments[1:])

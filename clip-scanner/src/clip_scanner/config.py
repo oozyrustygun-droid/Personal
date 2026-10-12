@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tomllib
 from pathlib import Path
@@ -38,8 +39,19 @@ GATE_NAMES = (
 )
 
 
+DEFAULT_FLOORS = {"hook_strength": 8.0, "payoff": 8.0}
+
+
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+def _finite(obj, *names: str) -> None:
+    """NaN/inf thresholds would make every comparison False and silently disable a check."""
+    for n in names:
+        v = getattr(obj, n)
+        if not math.isfinite(v):
+            raise ValueError(f"{type(obj).__name__}.{n} must be a finite number, got {v!r}")
 
 
 class GeneralCfg(_Section):
@@ -102,6 +114,15 @@ class GatesCfg(_Section):
     max_dead_air_s: float = 1.5
     music_prob: float = 0.5
     music_bed_max_fraction: float = 0.5
+    require_music_check: bool = True  # if the audio-event model is unavailable, the music gate fails
+
+    @model_validator(mode="after")
+    def _check(self) -> "GatesCfg":
+        _finite(self, "min_len_s", "max_len_s", "hook_window_s", "max_dead_air_s", "music_prob",
+                "music_bed_max_fraction")
+        if not 0 < self.min_len_s < self.max_len_s:
+            raise ValueError("gates: need 0 < min_len_s < max_len_s")
+        return self
 
 
 class JudgingCfg(_Section):
@@ -119,9 +140,9 @@ class JudgingCfg(_Section):
     context_window_s: float = 20.0
     max_output_tokens: int = 16000
     confirm_above_usd: float = 5.0
-    server_fallbacks: bool = True
+    server_fallbacks: bool = True   # only for packaging/diagnosis/proposer; never for verdicts
     cache_ttl: Literal["5m", "1h"] = "5m"
-    criterion_floors: dict[str, float] = {"hook_strength": 8.0, "payoff": 8.0}
+    criterion_floors: dict[str, float] = dict(DEFAULT_FLOORS)
     weights: dict[str, float] = {
         "hook_strength": 1.5,
         "payoff": 1.5,
@@ -133,8 +154,28 @@ class JudgingCfg(_Section):
         "visual_strength": 0.75,
     }
 
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_floors(cls, data):
+        # Setting one floor in config.toml must not silently drop the other default floors.
+        # To remove a floor on purpose, set it to 0.
+        if isinstance(data, dict) and isinstance(data.get("criterion_floors"), dict):
+            data = {**data, "criterion_floors": {**DEFAULT_FLOORS, **data["criterion_floors"]}}
+        return data
+
     @model_validator(mode="after")
     def _check(self) -> "JudgingCfg":
+        _finite(self, "overall_min", "rubric_mean_min", "consistency_allowance")
+        for name in ("overall_min", "rubric_mean_min"):
+            if not 0 <= getattr(self, name) <= 10:
+                raise ValueError(f"judging.{name} must be within 0-10")
+        if self.consistency_allowance < 0:
+            raise ValueError("judging.consistency_allowance must be >= 0")
+        for k, v in {**self.criterion_floors, **self.weights}.items():
+            if not math.isfinite(v):
+                raise ValueError(f"judging: {k} must be a finite number")
+        if any(not 0 <= v <= 10 for v in self.criterion_floors.values()):
+            raise ValueError("judging.criterion_floors must be within 0-10")
         unknown = (set(self.weights) | set(self.criterion_floors)) - set(RUBRIC_CRITERIA)
         if unknown:
             raise ValueError(f"unknown rubric criteria in config: {sorted(unknown)}")
@@ -153,6 +194,13 @@ class JudgingCfg(_Section):
 class DevilsAdvocateCfg(_Section):
     enabled: bool = True
     min_survival_confidence: float = 7.0
+
+    @model_validator(mode="after")
+    def _check(self) -> "DevilsAdvocateCfg":
+        _finite(self, "min_survival_confidence")
+        if not 0 <= self.min_survival_confidence <= 10:
+            raise ValueError("devils_advocate.min_survival_confidence must be within 0-10")
+        return self
 
 
 class ExportCfg(_Section):
@@ -243,17 +291,17 @@ class Config(_Section):
 
 
 def find_config_path(explicit: str | None = None) -> Path | None:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit).expanduser())
-    if os.environ.get("CLIP_SCANNER_CONFIG"):
-        candidates.append(Path(os.environ["CLIP_SCANNER_CONFIG"]).expanduser())
-    candidates += [Path.cwd() / "config.toml", REPO_ROOT / "config.toml"]
-    for p in candidates:
+    # An explicitly requested config that doesn't exist is an error, never a silent fallback to the
+    # default bar (a typo in the path to a stricter config must not loosen anything).
+    for named, label in ((explicit, "--config"), (os.environ.get("CLIP_SCANNER_CONFIG"), "$CLIP_SCANNER_CONFIG")):
+        if named:
+            p = Path(named).expanduser()
+            if not p.is_file():
+                raise FileNotFoundError(f"{label} file not found: {named}")
+            return p
+    for p in (Path.cwd() / "config.toml", REPO_ROOT / "config.toml"):
         if p.is_file():
             return p
-    if explicit:
-        raise FileNotFoundError(f"config file not found: {explicit}")
     return None
 
 

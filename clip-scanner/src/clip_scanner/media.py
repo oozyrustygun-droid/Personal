@@ -120,10 +120,10 @@ def make_proxy(src: Path, dst: Path, height: int, fps: int, hwaccel: str = "auto
     tmp.replace(dst)
 
 
-def extract_frame(src: Path, t: float, dst: Path, width: int) -> None:
-    """Grab one frame at time t (fast input seek), scaled to `width`, as JPEG."""
+def extract_frame(src: Path, t: float, dst: Path, width: int, vf: str | None = None) -> None:
+    """Grab one frame at time t (fast input seek) as JPEG: scaled to `width`, or through a custom filter."""
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", str(src), "-frames:v", "1",
-         "-vf", f"scale={width}:-2", "-q:v", "4", str(dst)])
+         "-vf", vf or f"scale={width}:-2", "-q:v", "4", str(dst)])
 
 
 def read_frames(src: Path, start: float, end: float, fps: float, width: int) -> tuple[np.ndarray, list[float]]:

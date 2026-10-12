@@ -1,29 +1,33 @@
-"""Keyframes per candidate so the judges can actually see the moment.
+"""Keyframes per candidate so the judges can actually see the moment, as it will be posted.
 
-Frames are taken from the hook (first 2 s), the payoff/peak, the highest-signal moments
-inside the clip, and the ending (loop point). Times are labelled in clip time.
+Frames show the 9:16 crop the export will use (same face tracking), not the full 16:9 frame. A clip
+must not pass on visuals that the vertical crop cuts away. Frames come from the opening (the hook
+window), the most active measured moments, and the ending (the loop point). Labels are neutral and
+never claim that a frame shows a payoff.
 """
 
 from __future__ import annotations
 
+import bisect
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from .candidates import Candidate
 from .cache import Workspace, fingerprint
+from .candidates import Candidate
 from .config import Config
-from .media import MediaError, extract_frame
+from .media import MediaError, extract_frame, probe
 from .signals import Signals
 
-KEYFRAMES_VERSION = 1
+KEYFRAMES_VERSION = 2
+TRACK_FPS = 2.0  # face-track sampling for keyframes (export uses export.face_sample_fps)
 
 
 @dataclass
 class Keyframe:
-    clip_t: float     # seconds from the start of the clip (pre-roll excluded)
+    clip_t: float     # seconds from the first posted frame
     source_t: float
     label: str
     path: Path
@@ -31,48 +35,65 @@ class Keyframe:
 
 def keyframe_times(c: Candidate, sig: Signals, n: int) -> list[tuple[float, str]]:
     dur = c.duration
-    picks: list[tuple[float, str]] = [(0.15, "hook: first frame"), (min(1.0, dur), "hook: 1.0s"),
-                                      (min(1.9, dur), "hook: 1.9s")]
-    picks.append((c.to_content(c.peak), "peak/payoff"))
-    picks += [(max(0.0, dur - 1.5), "ending"), (max(0.0, dur - 0.25), "last frame (loop point)")]
-    # Fill the rest with the highest-interest moments not already covered.
+    picks: list[tuple[float, str]] = [(0.15, "first frame"), (min(1.0, dur), "1.0s in"),
+                                      (min(1.9, dur), "1.9s in"),
+                                      (c.to_content(c.peak), "most active moment (measured)"),
+                                      (max(0.0, dur - 1.5), "1.5s before the end"),
+                                      (max(0.0, dur - 0.25), "last frame (loop point)")]
     clip_ts = np.arange(0.0, dur, 0.5)
     vals = [(sig.max_in("interest", c.to_source(t), c.to_source(t) + 0.5), t) for t in clip_ts]
     for _, t in sorted(vals, reverse=True):
         if len(picks) >= n:
             break
         if all(abs(t - p) > 1.0 for p, _ in picks):
-            picks.append((float(t), "high-signal moment"))
+            picks.append((float(t), "active moment (measured)"))
     picks = sorted({round(min(max(t, 0.0), max(dur - 0.05, 0.0)), 2): label for t, label in picks}.items())
-    if len(picks) > n:  # keep hook + peak + ending, thin the middle
-        must = [p for p in picks if not p[1].startswith("high-signal")]
-        rest = [p for p in picks if p[1].startswith("high-signal")]
+    if len(picks) > n:  # keep the opening, the most active moment and the ending; thin the middle
+        must = [p for p in picks if not p[1].startswith("active moment")]
+        rest = [p for p in picks if p[1].startswith("active moment")]
         picks = sorted((must + rest)[:n])
     return picks
 
 
 def extract_keyframes(ws: Workspace, media: Path, cands: list[Candidate], sig: Signals, cfg: Config,
                       candidates_fp: str) -> dict[str, list[Keyframe]]:
+    from .export import crop_geometry
+    from .facetrack import crop_path
+
     jc = cfg.judging
-    fp = fingerprint("keyframes", KEYFRAMES_VERSION, candidates_fp, jc.keyframes_per_candidate, jc.keyframe_width)
-    root = ws.path("keyframes", fp)
-    jobs: list[tuple[float, Path]] = []
+    sw, sh = probe(media).display_size
+    crop_w, crop_h, crop_y = crop_geometry(sw, sh, cfg.export.width, cfg.export.height)
+    horizontal = crop_w < sw
+    jobs: list[tuple[float, Path, str]] = []
     result: dict[str, list[Keyframe]] = {}
     for c in cands:
-        frames = []
-        for clip_t, label in keyframe_times(c, sig, jc.keyframes_per_candidate):
-            src_t = c.to_source(clip_t)
-            path = root / c.id / f"{clip_t:06.2f}.jpg"
-            frames.append(Keyframe(clip_t=clip_t, source_t=src_t, label=label, path=path))
-            if not path.exists():
-                jobs.append((src_t, path))
+        # Keyed on the exact segments and crop settings: a different window can never reuse these frames.
+        fp = fingerprint("keyframes", KEYFRAMES_VERSION, [list(s) for s in c.segments], jc.keyframes_per_candidate,
+                         jc.keyframe_width, cfg.section_hash("export"), sw, sh)
+        folder = ws.path("keyframes", f"{c.id}-{fp}")
+        times = keyframe_times(c, sig, jc.keyframes_per_candidate)
+        frames = [Keyframe(clip_t=t, source_t=c.to_source(t), label=label, path=folder / f"{t:06.2f}.jpg")
+                  for t, label in times]
         result[c.id] = frames
-    for _, p in jobs:
-        p.parent.mkdir(parents=True, exist_ok=True)
+        missing = [k for k in frames if not k.path.exists()]
+        if not missing:
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        if horizontal:
+            path = crop_path(media, c.segments, sw, sh, crop_w, cfg, fps=TRACK_FPS) or [(0.0, (sw - crop_w) // 2)]
+            pts = [t for t, _ in path]
+        for k in missing:
+            if horizontal:
+                i = min(max(bisect.bisect_left(pts, k.clip_t), 0), len(path) - 1)
+                x = path[i][1]
+                vf = f"crop={crop_w}:{crop_h}:{x}:{crop_y},scale=-2:{jc.keyframe_width}"
+            else:
+                vf = f"crop={crop_w}:{crop_h}:0:{crop_y},scale=-2:{jc.keyframe_width}"
+            jobs.append((k.source_t, k.path, vf))
 
-    def grab(job: tuple[float, Path]) -> None:
+    def grab(job: tuple[float, Path, str]) -> None:
         try:
-            extract_frame(media, job[0], job[1], jc.keyframe_width)
+            extract_frame(media, job[0], job[1], jc.keyframe_width, vf=job[2])
         except MediaError:
             pass  # e.g. a seek past the last frame; the prompt simply omits a missing frame
 

@@ -19,18 +19,6 @@ def _even(x: float) -> int:
     return max(2, int(round(x / 2)) * 2)
 
 
-def output_segments(cand, words, preroll: float, cuts=()) -> tuple[list[tuple[float, float]], float]:
-    """Segments with pre-roll prepended to the first one. The pre-roll is clamped so it never contains
-    the tail of the previous word (the clip would open mid-word) or reaches back across a scene cut
-    (the clip would open on a flash of the previous shot)."""
-    s0, e0 = cand.segments[0]
-    prev_end = max((w.end for w in words if w.end <= s0 + 1e-3), default=0.0)
-    last_cut = max((float(c) for c in cuts if c <= s0 + 1e-3), default=0.0)
-    pre = max(0.0, min(preroll, s0 - prev_end - 0.02, s0 - last_cut, s0))
-    segs = [(round(s0 - pre, 3), e0)] + list(cand.segments[1:])
-    return segs, pre
-
-
 def timed_words(cand, transcript, segs: list[tuple[float, float]]) -> list[TimedWord]:
     out, offset = [], 0.0
     for s, e in segs:
@@ -56,7 +44,10 @@ def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
     info = probe(src)
     sw, sh = info.display_size
     ex = cfg.export
-    segs, pre = output_segments(cand, a.transcript.words, ex.preroll_s, a.signals.scene_cuts)
+    # The candidate's segments already include the (clamped) pre-roll: export exactly what was judged.
+    segs = list(cand.segments)
+    first_word = min((w.start for w in a.transcript.words if segs[0][0] <= w.start <= segs[0][1]), default=segs[0][0])
+    pre = max(0.0, first_word - segs[0][0])
     total = sum(e - s for s, e in segs)
     crop_w, crop_h, crop_y = crop_geometry(sw, sh, ex.width, ex.height)
     horizontal = crop_w < sw
@@ -142,25 +133,66 @@ def render_raw(a, cand, out_path: Path, cfg: Config) -> Path:
     return out_path
 
 
-def prune_stale_clips(out_dir: Path, keep: set[str]) -> list[Path]:
-    """Delete exported MP4s that are not GREAT in the current run (e.g. after tightening the bar),
-    so the clips/ folder never offers something the latest verdict rejected."""
+def expected_files(out_dir: Path, a, result, cfg: Config) -> dict[str, str]:
+    """{path: render fingerprint} of every export the CURRENT verdict justifies."""
+    by_id = {c.id: c for c in a.candidates}
+    keep: dict[str, str] = {}
+    for rank, d in enumerate(result.great, 1):
+        c = by_id[d.candidate_id]
+        keep[str(clip_path(out_dir, rank, c.id, result.packaging))] = render_fingerprint(a, c, cfg)
+        if cfg.export.raw_copy:
+            keep[str(clip_path(out_dir, rank, c.id, result.packaging, raw=True))] = render_fingerprint(a, c, cfg, "raw")
+    return keep
+
+
+def _sidecar_fp(path: Path) -> str | None:
+    side = path.with_suffix(".json")
+    try:
+        return read_json(side).get("fingerprint") if side.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
+def prune_stale_clips(out_dir: Path, keep: dict[str, str]) -> list[Path]:
+    """Delete every export that the latest verdict does not justify: clips no longer GREAT, and files
+    whose render fingerprint doesn't match the window that was judged (e.g. after boundaries changed)."""
     removed = []
     for p in (out_dir / "clips").glob("*.mp4"):
-        if str(p) not in keep:
+        if str(p) not in keep or _sidecar_fp(p) != keep[str(p)]:
             p.unlink(missing_ok=True)
             p.with_suffix(".json").unlink(missing_ok=True)
             removed.append(p)
     return removed
 
 
-def expected_files(out_dir: Path, result, cfg: Config) -> set[str]:
-    keep = set()
-    for rank, d in enumerate(result.great, 1):
-        keep.add(str(clip_path(out_dir, rank, d.candidate_id, result.packaging)))
-        if cfg.export.raw_copy:
-            keep.add(str(clip_path(out_dir, rank, d.candidate_id, result.packaging, raw=True)))
-    return keep
+STASH = ".previous-run"
+
+
+def stash_exports(out_dir: Path) -> None:
+    """Before judging, move earlier exports out of sight. If this run is interrupted, clips/ must not
+    keep offering clips that a tightened bar might now reject."""
+    clips = out_dir / "clips"
+    if not clips.exists():
+        return
+    stash = clips / STASH
+    stash.mkdir(parents=True, exist_ok=True)
+    for p in list(clips.glob("*.mp4")) + list(clips.glob("*.json")):
+        p.replace(stash / p.name)
+
+
+def restore_exports(out_dir: Path, keep: dict[str, str]) -> None:
+    """After judging, bring back stashed renders that are still justified (saves re-encoding); drop the rest."""
+    stash = out_dir / "clips" / STASH
+    if not stash.exists():
+        return
+    for p in stash.glob("*.mp4"):
+        target = out_dir / "clips" / p.name
+        if str(target) in keep and _sidecar_fp(p) == keep[str(target)]:
+            p.with_suffix(".json").replace(target.with_suffix(".json"))
+            p.replace(target)
+    for p in stash.iterdir():
+        p.unlink(missing_ok=True)
+    stash.rmdir()
 
 
 def _render_cached(path: Path, fp: str, render, meta: dict, force: bool) -> bool:

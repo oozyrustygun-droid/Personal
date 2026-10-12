@@ -55,11 +55,14 @@ def transcript_lines(transcript: Transcript, start: float, end: float, pause_bre
     return "\n".join(lines)
 
 
-def propose(llm: LLM, transcript: Transcript, duration: float, cfg: Config, *, console=None) -> list[Moment]:
+def propose(llm: LLM, transcript: Transcript, duration: float, cfg: Config, *,
+            console=None) -> tuple[list[Moment], bool]:
+    """Returns (moments, complete). complete=False if any chunk failed for a retryable reason."""
     cc = cfg.candidates
     system = [{"type": "text", "text": PROPOSER_SYSTEM + load_style_guide(),
                "cache_control": {"type": "ephemeral"}}]
     out: list[Moment] = []
+    complete = True
     step = max(60.0, cc.proposer_chunk_s - 30.0)
     t = 0.0
     while t < duration:
@@ -78,10 +81,12 @@ def propose(llm: LLM, transcript: Transcript, duration: float, cfg: Config, *, c
         except LLMError as e:
             if console:
                 console.print(f"  [yellow]proposer skipped chunk {lo:.0f}-{hi:.0f}s: {e}[/yellow]")
+            if e.kind not in ("refusal", "schema"):  # deterministic failures won't improve on retry
+                complete = False
             if e.kind == "auth":
                 break
             continue
         for m in Proposals.model_validate(res.data).moments:
             if lo - 1 <= m.start_s < m.end_s <= hi + 1 and m.start_s <= m.payoff_s <= m.end_s + 1:
                 out.append(m)
-    return out
+    return out, complete

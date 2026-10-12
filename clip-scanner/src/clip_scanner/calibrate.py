@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import json
 import time
 import tomllib
 from dataclasses import dataclass
@@ -26,6 +25,8 @@ from .config import REPO_ROOT, Config, load_config
 from .judging.gates import GateResult
 from .judging.panel import Decision, JudgeOutcome, decide
 from .ui import console, fmt_usd, stage
+
+MIN_PER_LABEL_TO_WRITE = 10  # --write-config needs at least this many hits AND flops
 
 SWEEP = {
     "overall_min": [7.0, 7.5, 7.75, 8.0, 8.25, 8.5, 8.75, 9.0, 9.25, 9.5],
@@ -141,6 +142,35 @@ def sweep(labeled: list[tuple[str, Decision]], cfg: Config) -> dict:
     return {"grid": results, "recommended": rec, "note": ""}
 
 
+def loosened(rec: dict, cfg: Config) -> list[str]:
+    """Which recommended thresholds are LOOSER than the current bar."""
+    out = []
+    if rec["overall_min"] < cfg.judging.overall_min:
+        out.append(f"overall_min {cfg.judging.overall_min} -> {rec['overall_min']}")
+    if rec["rubric_mean_min"] < cfg.judging.rubric_mean_min:
+        out.append(f"rubric_mean_min {cfg.judging.rubric_mean_min} -> {rec['rubric_mean_min']}")
+    if rec["min_survival_confidence"] < cfg.devils_advocate.min_survival_confidence:
+        out.append(f"min_survival_confidence {cfg.devils_advocate.min_survival_confidence} -> "
+                   f"{rec['min_survival_confidence']}")
+    return out
+
+
+def write_guard(rec: dict | None, cfg: Config, hits: int, flops: int, scripted: bool, allow_loosen: bool) -> str | None:
+    """Reason to refuse --write-config, or None if writing is safe."""
+    if rec is None:
+        return "no safe recommendation to write"
+    if scripted:
+        return "verdicts came from the scripted test judge, not Claude"
+    if hits < MIN_PER_LABEL_TO_WRITE or flops < MIN_PER_LABEL_TO_WRITE:
+        return (f"need at least {MIN_PER_LABEL_TO_WRITE} labelled hits AND {MIN_PER_LABEL_TO_WRITE} flops "
+                f"(have {hits} hits, {flops} flops); a bar tuned on less overfits")
+    loose = loosened(rec, cfg)
+    if loose and not allow_loosen:
+        return ("the recommendation LOOSENS the bar (" + "; ".join(loose) + "). Re-run with --allow-loosen "
+                "if you have checked the per-clip results and really want that")
+    return None
+
+
 def write_thresholds(path: Path, rec: dict) -> None:
     import tomlkit
 
@@ -214,7 +244,7 @@ def run_calibrate(args: argparse.Namespace) -> int:
                                 a.meta.duration)
             c = a.candidates[0]
             det = deterministic_gates(c, a.transcript, a.signals, cfg)
-            d = judge_candidate(c, det, clip_measurements(c, a.transcript, a.signals), ctx, full_panel=True)
+            d = judge_candidate(c, det, clip_measurements(c, a.transcript, a.signals, cfg.gates.music_prob), ctx, full_panel=True)
             total_cost += a.tracker.total()
             if e.label in ("hit", "flop"):
                 labeled.append((e.label, d))
@@ -254,7 +284,15 @@ def run_calibrate(args: argparse.Namespace) -> int:
     write_json(out_dir / "calibration.json", {"current": current, "recommended": rec, "note": sw["note"],
                                               "clips": table, "grid": sw["grid"], "cost_usd": round(total_cost, 4)})
     console.print(f"[dim]details: {out_dir / 'calibration.json'} · API cost this run {fmt_usd(total_cost)}[/dim]")
-    if args.write_config and rec:
+    if rec:
+        loose = loosened(rec, cfg)
+        if loose:
+            console.print(f"[yellow]Note: this would LOOSEN the bar: {'; '.join(loose)}[/yellow]")
+    if args.write_config:
+        refusal = write_guard(rec, cfg, hits, flops, args.judge_backend == "scripted", args.allow_loosen)
+        if refusal:
+            console.print(f"[red]Not writing config.toml: {refusal}.[/red]")
+            return 1
         path = Path(cfg.source_path) if cfg.source_path else Path("config.toml")
         write_thresholds(path, rec)
         console.print(f"[green]wrote recommended thresholds to {path}[/green]")

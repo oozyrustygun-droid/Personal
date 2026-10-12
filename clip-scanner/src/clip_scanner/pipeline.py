@@ -93,7 +93,7 @@ def print_estimate(est: dict) -> None:
 
 def run_scan_cli(args: argparse.Namespace) -> int:
     from .judging.runner import build_context, confirm_cost, run_judging
-    from .report import print_report, write_reports
+    from .report import out_dir_for, print_report, write_in_progress, write_reports
 
     cfg = load_config(args.config)
     max_clips = args.max_clips or cfg.general.max_clips
@@ -108,21 +108,30 @@ def run_scan_cli(args: argparse.Namespace) -> int:
             return False
         return confirm_cost(est, cfg, args.yes, console)
 
+    from .export import expected_files, export_clips, prune_stale_clips, restore_exports, stash_exports
+
+    scripted = args.judge_backend == "scripted"
+    out_dir = out_dir_for(a, cfg, scripted=scripted)
+    if not args.dry_run:
+        # If this run dies mid-way, the folder must say so, and must not keep showing old GREAT clips.
+        write_in_progress(a, cfg, out_dir, scripted=scripted)
+        stash_exports(out_dir)
     with stage("Judging"):
         result = run_judging(a.candidates, ctx, max_clips=max_clips, console=console, on_estimate=on_estimate)
     if args.dry_run:
         console.print("[dim]--dry-run: stopped before judging.[/dim]")
         return 0
-    from .export import expected_files, export_clips, prune_stale_clips
-
-    paths = write_reports(a, result, cfg, explain_rejects=args.explain_rejects)
+    keep = expected_files(out_dir, a, result, cfg)
+    restore_exports(out_dir, keep)
+    paths = write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, scripted=scripted)
     exported = {}
     if result.great and not args.no_cut:
         with stage("Export"):
-            exported = export_clips(a, result, cfg, paths["dir"], force="export" in set(args.rerun))
-        paths = write_reports(a, result, cfg, explain_rejects=args.explain_rejects, exported=exported)
-    # Keep exports of clips that are GREAT now (even under --no-cut); remove anything else.
-    for p in prune_stale_clips(paths["dir"], expected_files(paths["dir"], result, cfg)):
+            exported = export_clips(a, result, cfg, out_dir, force="export" in set(args.rerun))
+        paths = write_reports(a, result, cfg, out_dir, explain_rejects=args.explain_rejects, exported=exported,
+                              scripted=scripted)
+    # Keep exports the current verdict justifies (even under --no-cut); remove everything else.
+    for p in prune_stale_clips(out_dir, keep):
         console.print(f"  [dim]removed stale export that is no longer GREAT: {p.name}[/dim]")
     print_report(a, result, cfg, paths, explain_rejects=args.explain_rejects, exported=exported)
     return 0 if result.status != "unavailable" else 3

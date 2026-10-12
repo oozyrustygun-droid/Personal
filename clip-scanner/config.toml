@@ -64,6 +64,7 @@ hook_window_s = 2.0            # something must happen (speech onset or reaction
 max_dead_air_s = 1.5           # longest allowed stretch with no words, no reaction audio, no spike
 music_prob = 0.5               # YAMNet music score that counts as "music present"
 music_bed_max_fraction = 0.5   # music present for more than this share of the clip -> reject
+require_music_check = true     # if music can't be measured (audio-event model unavailable), reject
 
 [judging]
 model = "claude-opus-5-5"
@@ -80,10 +81,11 @@ keyframe_width = 768
 context_window_s = 20.0        # transcript shown before/after the clip, marked NOT IN CLIP
 max_output_tokens = 16000
 confirm_above_usd = 5.0        # ask before judging if the estimate exceeds this (--yes skips)
-server_fallbacks = true        # retry policy declines on Anthropic's recommended fallback model
+server_fallbacks = true        # packaging/diagnosis/proposer only. A verdict from any model other than
+                               # `model` never counts: a judge refusal is a rejection, not a retry elsewhere
 cache_ttl = "5m"               # 5m | 1h  (prompt-cache TTL for the shared prefixes)
 
-[judging.criterion_floors]     # every judge must also clear these per-criterion minimums
+[judging.criterion_floors]     # every judge must also clear these per-criterion minimums (set 0 to drop one)
 hook_strength = 8.0
 payoff = 8.0
 

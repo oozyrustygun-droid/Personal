@@ -3,7 +3,8 @@ import pytest
 from clip_scanner.candidates import Candidate
 from clip_scanner.captions import TimedWord, ass_time, build_ass, caption_events, clean_word
 from clip_scanner.config import CaptionsCfg, Config
-from clip_scanner.export import crop_geometry, output_segments, timed_words
+from clip_scanner.boundaries import apply_preroll
+from clip_scanner.export import crop_geometry, timed_words
 from clip_scanner.facetrack import smooth_path
 from clip_scanner.transcribe import Transcript, Word
 
@@ -50,14 +51,11 @@ def test_build_ass_has_style_and_events():
 
 def test_preroll_clamped_by_previous_word_and_scene_cut():
     words = [Word(9.0, 9.9, "before"), Word(10.0, 10.4, "start")]
-    c = Candidate("c", [(9.95, 20.0)], 15.0, "signal", 1.0, "")
-    segs, pre = output_segments(c, words, 0.3)
-    assert pre == pytest.approx(0.03, abs=1e-6) and segs[0][0] >= 9.9  # never includes "before"
-    c2 = Candidate("c", [(12.0, 20.0)], 15.0, "signal", 1.0, "")
-    segs2, pre2 = output_segments(c2, words, 0.3, cuts=[11.9])
-    assert pre2 == pytest.approx(0.1) and segs2[0][0] == pytest.approx(11.9)  # stops at the cut
-    segs3, pre3 = output_segments(c2, words, 0.3)
-    assert pre3 == pytest.approx(0.3)
+    segs = apply_preroll([(9.95, 20.0)], words, [], 0.3)
+    assert segs[0][0] >= 9.9  # never includes the tail of "before"
+    segs2 = apply_preroll([(12.0, 20.0), (25.0, 30.0)], words, [11.9], 0.3)
+    assert segs2[0][0] == pytest.approx(11.9) and segs2[1] == (25.0, 30.0)  # stops at the scene cut
+    assert apply_preroll([(12.0, 20.0)], words, [], 0.3)[0][0] == pytest.approx(11.7)
 
 
 def test_timed_words_follow_jump_cuts():

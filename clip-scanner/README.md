@@ -91,8 +91,14 @@ included verbatim in every judge's system prompt. Edit it and the next run uses 
 Claude API details: structured outputs (`output_config.format`) for every call; adaptive thinking
 at `effort = "high"`; the handbook, style guide and full transcript sit in cached system blocks
 (`cache_control`), so the three personas, the devil's advocate and the arbiter all read the same cached prefix.
-Server-side refusal fallbacks (`fallbacks: "default"`) are on by default (`[judging] server_fallbacks`).
-A refused or failed call never counts as a pass.
+A refused, failed or malformed call never counts as a pass. A verdict answered by any model other than
+the configured judge model (for example by a server-side refusal fallback) is treated as no verdict.
+Fallbacks (`fallbacks: "default"`) are only used for packaging, the one-line diagnosis and the recall
+proposer (`[judging] server_fallbacks`). Judges and the arbiter never see the video title or the full
+stream transcript, because a viewer of the clip has neither, so "standalone" is judged from the viewer's seat. Only the
+devil's advocate reads the whole transcript, to catch inside jokes. All video text is wrapped
+in tags and declared data, not instructions. The keyframes the judges see are the 9:16 crop that will
+actually be posted.
 
 ## Tightening or loosening the bar
 
@@ -133,7 +139,9 @@ Add clips with known view counts to [`calibration/manifest.toml`](calibration/ma
 files or URLs). Each is judged as posted by the full panel plus the devil's advocate. You get
 precision, recall, the share of known flops that would pass, and the score gap between your weakest
 hit and your strongest flop. The command then sweeps the thresholds over the cached verdicts and
-recommends the smallest change that rejects every known flop. See [`calibration/README.md`](calibration/README.md).
+recommends the smallest change that rejects every known flop. `--write-config` refuses with fewer than
+10 hits and 10 flops, and only ever tightens the bar unless you add `--allow-loosen`.
+See [`calibration/README.md`](calibration/README.md).
 
 **Your own flops are the most valuable data.** The tool exists to reject clips like them.
 

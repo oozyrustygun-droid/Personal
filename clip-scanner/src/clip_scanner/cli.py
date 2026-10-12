@@ -14,6 +14,13 @@ from . import __version__
 from .ui import console
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return value
+
+
 def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", help="path to config.toml (default: ./config.toml, then the repo's)")
     p.add_argument("-y", "--yes", action="store_true", help="skip the cost confirmation prompt")
@@ -30,7 +37,8 @@ def scan_parser() -> argparse.ArgumentParser:
         epilog="Other commands: `clip-scanner calibrate --help`, `clip-scanner doctor`.",
     )
     p.add_argument("source", help="YouTube/TikTok URL or a local video file")
-    p.add_argument("--max-clips", type=int, default=None, help="cap on GREAT clips returned (default from config: 5)")
+    p.add_argument("--max-clips", type=_positive_int, default=None,
+                   help="cap on GREAT clips returned (default from config: 5); never fills with non-GREAT")
     p.add_argument("--no-cut", action="store_true", help="report only; do not export vertical MP4s")
     p.add_argument("--explain-rejects", action="store_true", help="list every rejected candidate with its reason")
     p.add_argument("--dry-run", action="store_true", help="stop after candidate generation and show the cost estimate")
@@ -50,7 +58,10 @@ def calibrate_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--manifest", help="manifest TOML (default from config: calibration/manifest.toml)")
     p.add_argument("--fetch", action="store_true", help="download manifest entries that only have a URL")
-    p.add_argument("--write-config", action="store_true", help="write the suggested thresholds into config.toml")
+    p.add_argument("--write-config", action="store_true",
+                   help="write the suggested thresholds into config.toml (needs >=10 hits and >=10 flops)")
+    p.add_argument("--allow-loosen", action="store_true",
+                   help="let --write-config lower a threshold (by default it only ever tightens)")
     p.add_argument("--only", nargs="+", metavar="ID", help="only these manifest ids")
     _common(p)
     return p

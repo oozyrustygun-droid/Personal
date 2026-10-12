@@ -37,6 +37,7 @@ class JudgeOutcome:
     error: str | None = None
     served_model: str = ""
     skipped: bool = False            # not run because an earlier judge already rejected (short-circuit)
+    fallback: bool = False           # answered by a substitute model after a refusal: never counts
 
 
 @dataclass
@@ -107,6 +108,12 @@ def assess_judge(outcome: JudgeOutcome, cfg: Config) -> JudgeAssessment:
     if outcome.verdict is None:
         why = outcome.error or ("not run" if outcome.skipped else "no verdict")
         return JudgeAssessment(p, False, None, None, None, [], [f"{p}: no valid verdict ({why})"], unavailable=True)
+    served = outcome.served_model
+    if outcome.fallback or (served and not (served == j.model or served.startswith(j.model + "-"))):
+        # A refusal answered by another model is not this judge's verdict. Treat it as no verdict.
+        return JudgeAssessment(p, False, None, None, None, [],
+                               [f"{p}: verdict came from {served or 'a fallback model'}, not {j.model}"],
+                               unavailable=True)
     v = outcome.verdict
     reasons: list[str] = []
     overall = v.get("overall")
@@ -145,6 +152,9 @@ def panel_consensus(outcomes: list[JudgeOutcome], cfg: Config) -> tuple[bool, li
     expected = list(cfg.judging.judges)
     by_persona = {o.persona: o for o in outcomes}
     reasons: list[str] = []
+    personas = [o.persona for o in outcomes]
+    if len(personas) != len(set(personas)):
+        reasons.append("duplicate verdicts for the same judge; the panel result is unreliable")
     assessments: list[JudgeAssessment] = []
     for p in expected:
         o = by_persona.get(p) or JudgeOutcome(persona=p, error="missing")
@@ -159,13 +169,17 @@ def panel_consensus(outcomes: list[JudgeOutcome], cfg: Config) -> tuple[bool, li
         for g in a.failed_gates:
             gate_fails.setdefault(g, []).append(a.persona)
     n = len(expected)
-    for g in GATE_NAMES:
-        who = gate_fails.get(g, [])
-        fatal = bool(who) if cfg.judging.gate_policy == "any" else len(who) * 2 > n
-        if fatal:
-            o = by_persona.get(who[0])
-            ev = (o.verdict or {}).get("gates", {}).get(g, {}).get("evidence", "") if o else ""
-            reasons.append(f"gate '{GATE_LABELS[g]}' failed ({', '.join(who)}): {ev}".rstrip(": "))
+    # "any": one judge failing one gate kills the clip. "majority": the clip dies once more than half
+    # the judges failed at least one gate. Different judges failing different gates add up.
+    gate_failers = {a.persona for a in assessments if a.failed_gates}
+    fatal_policy = bool(gate_failers) if cfg.judging.gate_policy == "any" else len(gate_failers) * 2 > n
+    if fatal_policy:
+        for g in GATE_NAMES:
+            who = gate_fails.get(g, [])
+            if who:
+                o = by_persona.get(who[0])
+                ev = (o.verdict or {}).get("gates", {}).get(g, {}).get("evidence", "") if o else ""
+                reasons.append(f"gate '{GATE_LABELS[g]}' failed ({', '.join(who)}): {ev}".rstrip(": "))
     for a in assessments:
         if not a.unavailable:
             reasons.extend(a.reasons)
@@ -214,12 +228,15 @@ def decide(candidate_id: str, det: list[GateResult], outcomes: list[JudgeOutcome
         # If the only problems are judges that never produced a verdict (API error, refusal),
         # this is an incomplete judgment, not a quality verdict. It is still not GREAT.
         real = [a for a in assessments if not a.unavailable and (a.reasons or a.failed_gates)]
-        errored = any(o.error for o in outcomes) or len(outcomes) < len(cfg.judging.judges)
+        errored = any(a.unavailable for a in assessments)
         stage = "error" if not real and errored else "panel"
-        return Decision(candidate_id, False, stage, reasons, **common)
+        # devil/arbiter are kept (calibration runs them on every clip) so threshold sweeps can re-decide.
+        return Decision(candidate_id, False, stage, reasons, devil=devil, arbiter=arbiter, **common)
     survives, why = devils_verdict(arbiter, devil_error, cfg)
     if not survives:
-        return Decision(candidate_id, False, "devils_advocate", why, devil=devil, arbiter=arbiter, **common)
+        # The panel passed it, but the adversarial check couldn't run: incomplete, not a quality verdict.
+        stage = "error" if arbiter is None and devil_error else "devils_advocate"
+        return Decision(candidate_id, False, stage, why, devil=devil, arbiter=arbiter, **common)
     return Decision(candidate_id, True, "great", [], devil=devil, arbiter=arbiter, **common)
 
 

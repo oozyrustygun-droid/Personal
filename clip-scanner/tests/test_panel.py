@@ -241,3 +241,46 @@ def test_judge_rejects_matches_assessment():
     assert judge_rejects(JudgeOutcome("jaded_scroller", verdict(8.0)), CFG)
     assert not judge_rejects(JudgeOutcome("jaded_scroller", verdict(9.0)), CFG)
     assert judge_rejects(JudgeOutcome("jaded_scroller", error="x"), CFG)
+
+
+# ---- regressions from the adversarial review -----------------------------------------------------
+
+def test_verdict_from_fallback_model_never_counts():
+    """A refusal answered by a different model is not the judge's verdict (review finding #1)."""
+    outs = panel(verdict(9.5), verdict(9.5), verdict(9.5))
+    outs[1].served_model = "claude-sonnet-5-5"
+    d = decide("c1", DET_OK, outs, SURVIVES, {}, CFG)
+    assert not d.great and d.stage == "error"
+    outs2 = panel(verdict(9.5), verdict(9.5), verdict(9.5))
+    outs2[2].fallback = True
+    assert not decide("c1", DET_OK, outs2, SURVIVES, {}, CFG).great
+
+
+def test_dated_snapshot_of_configured_model_is_accepted():
+    outs = panel(verdict(9.5), verdict(9.5), verdict(9.5))
+    for o in outs:
+        o.served_model = "claude-opus-5-5-20260901"
+    assert decide("c1", DET_OK, outs, SURVIVES, {}, CFG).great
+
+
+def test_duplicate_judge_verdicts_fail_closed():
+    outs = panel(verdict(9.5), verdict(9.5), verdict(9.5)) + [JudgeOutcome(PERSONAS[0], verdict=verdict(9.6))]
+    assert not decide("c1", DET_OK, outs, SURVIVES, {}, CFG).great
+
+
+def test_majority_policy_counts_judges_failing_any_gate():
+    cfg = Config.model_validate({"judging": {"gate_policy": "majority"}})
+    outs = panel(verdict(9.5, gates_fail=("standalone",), vote="GREAT"),
+                 verdict(9.5, gates_fail=("monetization_safe",), vote="GREAT"), verdict(9.5))
+    assert not decide("c1", DET_OK, outs, SURVIVES, {}, cfg).great
+
+
+def test_devils_advocate_failure_is_incomplete_not_a_quality_verdict():
+    d = decide("c1", DET_OK, panel(verdict(9.5), verdict(9.5), verdict(9.5)), None, None, CFG,
+               devil_error="arbiter failed: api: 529")
+    assert not d.great and d.stage == "error"
+
+
+def test_panel_rejection_keeps_devil_ruling_for_calibration_sweeps():
+    d = decide("c1", DET_OK, panel(verdict(8.0), verdict(9), verdict(9)), SURVIVES, {"x": 1}, CFG)
+    assert not d.great and d.arbiter == SURVIVES and d.devil == {"x": 1}

@@ -85,8 +85,9 @@ def test_request_shape_and_cost(mock, tmp_path):
     req = mock.requests[0]
     body = req["body"]
     assert req["path"].startswith("/v1/messages")
-    assert "server-side-fallback-2026-07-01" in req["headers"].get("anthropic-beta", "")
-    assert body["fallbacks"] == "default"
+    # Verdict calls never ask for a substitute model: a refusal must stay a refusal.
+    assert "fallbacks" not in body
+    assert "server-side-fallback" not in req["headers"].get("anthropic-beta", "")
     assert body["thinking"] == {"type": "adaptive"}
     assert body["output_config"]["effort"] == "high"
     fmt = body["output_config"]["format"]
@@ -149,9 +150,12 @@ def test_fallback_iterations_are_all_billed(mock, tmp_path):
                  {"type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 100, "output_tokens": 50,
                   "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}]}
     mock.responses.append(message(json.dumps({"reason": "ok", "score": 5}), usage=usage, model="claude-opus-4-8"))
-    res = llm.call(purpose="judge", model="claude-opus-5-5", system=SYSTEM, messages=MSGS, output=Out,
-                   effort="high", max_tokens=16000)
-    assert res.served_model == "claude-opus-4-8"
+    res = llm.call(purpose="packaging", model="claude-opus-5-5", system=SYSTEM, messages=MSGS, output=Out,
+                   effort="high", max_tokens=16000, allow_fallback=True)
+    req = mock.requests[0]
+    assert req["body"]["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in req["headers"].get("anthropic-beta", "")
+    assert res.served_model == "claude-opus-4-8" and res.fallback_used
     assert len(res.usages) == 2
     opus = (1000 * 4 + 10 * 20) / 1e6
     assert tracker.total() >= opus
@@ -161,3 +165,25 @@ def test_strict_schema_requires_all_fields():
     s = strict_schema(Out)
     assert set(s["required"]) == {"reason", "score"}
     assert s["additionalProperties"] is False
+
+
+def test_fallback_flag_is_part_of_the_cache_key(mock, tmp_path):
+    """A cached answer from a fallback-enabled request must not be served to a fallback-free request."""
+    llm, _, _ = make(mock, tmp_path)
+    mock.responses.append(message(json.dumps({"reason": "a", "score": 9}), model="claude-sonnet-5-5"))
+    first = llm.call(purpose="judge", model="claude-opus-5-5", system=SYSTEM, messages=MSGS, output=Out,
+                     effort="high", max_tokens=16000, allow_fallback=True)
+    assert first.fallback_used
+    mock.responses.append(message(json.dumps({"reason": "b", "score": 6})))
+    second = llm.call(purpose="judge", model="claude-opus-5-5", system=SYSTEM, messages=MSGS, output=Out,
+                      effort="high", max_tokens=16000)
+    assert not second.cached and not second.fallback_used and second.data["score"] == 6
+    assert len(mock.requests) == 2
+
+
+def test_unexpected_sdk_error_fails_closed(mock, tmp_path):
+    llm, _, _ = make(mock, tmp_path)
+    mock.responses.append({"not": "a message"})  # malformed body -> SDK can't build a Message
+    with pytest.raises(LLMError):
+        llm.call(purpose="judge", model="claude-opus-5-5", system=SYSTEM, messages=MSGS, output=Out,
+                 effort="high", max_tokens=16000)

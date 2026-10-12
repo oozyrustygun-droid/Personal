@@ -38,8 +38,8 @@ class JudgeContext:
     signals: Signals
     frames: dict[str, list]
     handbook: str
-    video_text: str
-    title: str = ""
+    duration: float
+    title: str = ""  # for reports only. Never sent to the judges.
 
 
 @dataclass
@@ -55,8 +55,7 @@ class JudgingResult:
 def build_context(cfg: Config, llm: LLM, transcript: Transcript, signals: Signals, frames, title: str,
                   uploader: str, duration: float) -> JudgeContext:
     return JudgeContext(cfg=cfg, llm=llm, transcript=transcript, signals=signals, frames=frames,
-                        handbook=prompts.handbook(load_style_guide()),
-                        video_text=prompts.video_block(title, uploader, duration, transcript, cfg), title=title)
+                        handbook=prompts.handbook(load_style_guide()), duration=duration, title=title)
 
 
 def _meta(c: Candidate, ctx: JudgeContext, **extra) -> dict:
@@ -67,49 +66,57 @@ def _meta(c: Candidate, ctx: JudgeContext, **extra) -> dict:
 
 def _judge_once(c: Candidate, persona: str, packet: list[dict], ctx: JudgeContext) -> JudgeOutcome:
     j = ctx.cfg.judging
-    system = prompts.system_blocks(ctx.handbook, ctx.video_text, persona, j.cache_ttl)
+    system = prompts.system_blocks(ctx.handbook, persona, j.cache_ttl)
     try:
         res = ctx.llm.call(purpose="judge", model=j.model, system=system,
                            messages=[{"role": "user", "content": packet}], output=JudgeVerdict, effort=j.effort,
                            max_tokens=j.max_output_tokens, meta=_meta(c, ctx, persona=persona))
-        return JudgeOutcome(persona=persona, verdict=res.data, served_model=res.served_model)
+        return JudgeOutcome(persona=persona, verdict=res.data, served_model=res.served_model,
+                            fallback=res.fallback_used)
     except LLMError as e:
         return JudgeOutcome(persona=persona, error=str(e))
 
 
 def _panel_summary(outcomes: list[JudgeOutcome]) -> str:
+    """The panel's case in words only. Scores are withheld so they don't anchor the devil or the arbiter."""
     parts = []
     for i, o in enumerate(outcomes, 1):
         v = o.verdict or {}
-        sc = v.get("scores", {})
-        parts.append(f"Judge {i}: overall {v.get('overall')}; hook {sc.get('hook_strength', {}).get('score')}, "
-                     f"payoff {sc.get('payoff', {}).get('score')}. Why: {v.get('overall_justification', '')} "
-                     f"Self-identified weakness: {v.get('biggest_weakness', '')}")
+        parts.append(f"Judge {i}: {v.get('overall_justification', '')} "
+                     f"(Their own biggest worry: {v.get('biggest_weakness', '')})")
     return "\n".join(parts)
 
 
 def _devil_and_arbiter(c: Candidate, packet: list[dict], outcomes: list[JudgeOutcome], ctx: JudgeContext):
+    """Returns (devil, ruling, error). Neither call may be answered by a fallback model."""
     j = ctx.cfg.judging
     panel_case = _panel_summary(outcomes)
+    stream = prompts.transcript_block(ctx.duration, ctx.transcript, ctx.cfg, j.cache_ttl)
     try:
-        devil = ctx.llm.call(
+        res = ctx.llm.call(
             purpose="devils_advocate", model=j.model,
-            system=prompts.system_blocks(ctx.handbook, ctx.video_text, "devils_advocate", j.cache_ttl),
-            messages=[{"role": "user", "content": packet + [
+            system=prompts.system_blocks(ctx.handbook, "devils_advocate", j.cache_ttl),
+            messages=[{"role": "user", "content": [stream] + packet + [
                 {"type": "text", "text": f"THE PANEL'S CASE FOR THIS CLIP:\n{panel_case}\n\nMake the case it flops."}]}],
             output=DevilsCase, effort=j.effort, max_tokens=j.max_output_tokens,
-            meta=_meta(c, ctx, role="devils_advocate")).data
+            meta=_meta(c, ctx, role="devils_advocate"))
+        if res.fallback_used:
+            return None, None, f"devil's advocate answered by {res.served_model}, not {j.model}"
+        devil = res.data
     except LLMError as e:
         return None, None, f"devil's advocate failed: {e}"
     try:
-        ruling = ctx.llm.call(
+        res = ctx.llm.call(
             purpose="arbiter", model=j.model,
-            system=prompts.system_blocks(ctx.handbook, ctx.video_text, "arbiter", j.cache_ttl),
+            system=prompts.system_blocks(ctx.handbook, "arbiter", j.cache_ttl),
             messages=[{"role": "user", "content": packet + [{"type": "text", "text": (
-                f"THE PANEL'S CASE FOR THIS CLIP:\n{panel_case}\n\n"
+                f"THE PANEL'S REASONS FOR THIS CLIP:\n{panel_case}\n\n"
                 f"THE DEVIL'S ADVOCATE'S CASE AGAINST IT:\n{json.dumps(devil, indent=1)}\n\nRule.")}]}],
             output=ArbiterRuling, effort=j.effort, max_tokens=j.max_output_tokens,
-            meta=_meta(c, ctx, role="arbiter", devil=devil)).data
+            meta=_meta(c, ctx, role="arbiter", devil=devil))
+        if res.fallback_used:
+            return devil, None, f"arbiter answered by {res.served_model}, not {j.model}"
+        ruling = res.data
     except LLMError as e:
         return devil, None, f"arbiter failed: {e}"
     return devil, ruling, None
@@ -154,8 +161,9 @@ def estimate_cost(cands: list[Candidate], dets: dict[str, list[GateResult]], ctx
     price = cfg.price(j.model)
     eligible = [c for c in cands if all(g.passed for g in dets[c.id])]
     # Requests already in the on-disk cache cost nothing.
-    uncached = [c for c in eligible if not _first_request_cached(c, j.judges[0], ctx)]
-    prefix_tokens = estimate_tokens(ctx.handbook) + estimate_tokens(ctx.video_text)
+    uncached = [c for c in eligible if ctx.llm.refresh or not _first_request_cached(c, j.judges[0], ctx)]
+    prefix_tokens = estimate_tokens(ctx.handbook)
+    stream_tokens = estimate_tokens(" ".join(w.text for w in ctx.transcript.words)) * 1.3  # + timestamps
     role_tokens = 450
     per_clip_text = 1800
     img = sum(image_tokens(j.keyframe_width, int(j.keyframe_width * 9 / 16)) for _ in range(j.keyframes_per_candidate))
@@ -169,12 +177,19 @@ def estimate_cost(cands: list[Candidate], dets: dict[str, list[GateResult]], ctx
         cache = prefix_tokens * write_rate + (n_calls - 1) * prefix_tokens * price.cache_read
         return (fresh + cache) / 1e6
 
+    def devil_cost(n_finalists: float) -> float:
+        # The devil's advocate also reads the full stream transcript (cached after the first call).
+        if n_finalists <= 0 or not cfg.devils_advocate.enabled:
+            return 0.0
+        return (stream_tokens * write_rate + (n_finalists - 1) * stream_tokens * price.cache_read) / 1e6
+
     n = len(uncached)
     k = len(j.judges)
     expected_judges = sum(ASSUMED_PASS_RATE ** i for i in range(k)) if j.short_circuit else k
     expected_finalists = n * ASSUMED_PASS_RATE ** k
-    expected = call_cost(round(n * expected_judges + 2 * expected_finalists * cfg.devils_advocate.enabled))
-    worst = call_cost(n * k + 2 * n * cfg.devils_advocate.enabled)
+    expected = call_cost(round(n * expected_judges + 2 * expected_finalists * cfg.devils_advocate.enabled)) \
+        + devil_cost(max(1.0, expected_finalists) if n else 0)
+    worst = call_cost(n * k + 2 * n * cfg.devils_advocate.enabled) + devil_cost(n)
     return {"candidates": len(cands), "eligible": len(eligible), "uncached": n, "expected_usd": round(expected, 2),
             "worst_case_usd": round(worst, 2), "prefix_tokens": prefix_tokens, "model": j.model,
             "effort": j.effort}
@@ -182,9 +197,9 @@ def estimate_cost(cands: list[Candidate], dets: dict[str, list[GateResult]], ctx
 
 def _first_request_cached(c: Candidate, persona: str, ctx: JudgeContext) -> bool:
     j = ctx.cfg.judging
-    measurements = clip_measurements(c, ctx.transcript, ctx.signals)
+    measurements = clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), ctx.cfg)
-    system = prompts.system_blocks(ctx.handbook, ctx.video_text, persona, j.cache_ttl)
+    system = prompts.system_blocks(ctx.handbook, persona, j.cache_ttl)
     from ..llm import strict_schema
 
     rh = ctx.llm.request_hash(model=j.model, system=system, messages=[{"role": "user", "content": packet}],
@@ -208,17 +223,18 @@ def confirm_cost(est: dict, cfg: Config, assume_yes: bool, console) -> bool:
 
 def package(c: Candidate, decision: Decision, ctx: JudgeContext) -> dict:
     j = ctx.cfg.judging
-    measurements = clip_measurements(c, ctx.transcript, ctx.signals)
+    measurements = clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), ctx.cfg)
     hooks = [jd.get("verdict", {}) or {} for jd in decision.judges]
     notes = "\n".join(f"- {h.get('hook_line', '')} | {h.get('overall_justification', '')}" for h in hooks if h)
     try:
         return ctx.llm.call(
             purpose="packaging", model=j.model,
-            system=prompts.system_blocks(ctx.handbook, ctx.video_text, "packaging", j.cache_ttl),
+            system=prompts.system_blocks(ctx.handbook, "packaging", j.cache_ttl),
             messages=[{"role": "user", "content": packet + [
                 {"type": "text", "text": f"PANEL NOTES:\n{notes}\n\nWrite the packaging."}]}],
-            output=Packaging, effort="medium", max_tokens=8000, meta=_meta(c, ctx, role="packaging")).data
+            output=Packaging, effort="medium", max_tokens=8000, meta=_meta(c, ctx, role="packaging"),
+            allow_fallback=True).data
     except LLMError as e:
         first = (hooks[0] if hooks else {}) or {}
         return {"hook_line": first.get("hook_line", ""), "why_viral": first.get("overall_justification", ""),
@@ -233,14 +249,14 @@ def diagnose(decisions: list[Decision], ctx: JudgeContext) -> str:
         stages[d.stage] = stages.get(d.stage, 0) + 1
     top = sorted(decisions, key=near_miss_key)[:8]
     summary = "\n".join(f"- {d.candidate_id} ({d.stage}): {d.reasons[0] if d.reasons else ''}" for d in top)
-    text = (f"Video: {ctx.title}\nCandidates judged: {len(decisions)}; rejected at stage: {stages}\n"
+    text = (f"Candidates judged: {len(decisions)}; rejected at stage: {stages}\n"
             f"Closest candidates and why they died:\n{summary}")
     try:
         return ctx.llm.call(
             purpose="diagnosis", model=j.model,
-            system=prompts.system_blocks(ctx.handbook, ctx.video_text, "diagnosis", j.cache_ttl),
+            system=prompts.system_blocks(ctx.handbook, "diagnosis", j.cache_ttl),
             messages=[{"role": "user", "content": text}], output=Diagnosis, effort="low", max_tokens=4000,
-            meta={"role": "diagnosis", "stages": stages}).data["one_line_read"]
+            meta={"role": "diagnosis", "stages": stages}, allow_fallback=True).data["one_line_read"]
     except LLMError:
         common = max(stages, key=stages.get) if stages else "n/a"
         return f"Most candidates died at the {common.replace('_', ' ')} stage; no moment cleared every gate and the 8.5 bar."
@@ -250,7 +266,7 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
                 full_panel: bool = False, on_estimate=None) -> JudgingResult:
     cfg = ctx.cfg
     dets = {c.id: deterministic_gates(c, ctx.transcript, ctx.signals, cfg) for c in cands}
-    meas = {c.id: clip_measurements(c, ctx.transcript, ctx.signals) for c in cands}
+    meas = {c.id: clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob) for c in cands}
     est = estimate_cost(cands, dets, ctx)
     if on_estimate is not None and not on_estimate(est):
         return JudgingResult(decisions=[], great=[], status="unavailable", notes=["judging cancelled at cost prompt"])

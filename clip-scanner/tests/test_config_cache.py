@@ -46,3 +46,30 @@ def test_workspace_stage_fingerprints(tmp_path):
     assert not ws.is_done("stage", fingerprint("stage", 2, {"a": 1}), [out])
     out.unlink()
     assert not ws.is_done("stage", fp, [out])
+
+
+def test_setting_one_floor_keeps_the_other(tmp_path):
+    """Review finding #5: tightening hook_strength must not silently drop the payoff floor."""
+    f = tmp_path / "config.toml"
+    f.write_text("[judging.criterion_floors]\nhook_strength = 8.5\n")
+    cfg = load_config(str(f))
+    assert cfg.judging.criterion_floors == {"hook_strength": 8.5, "payoff": 8.0}
+
+
+@pytest.mark.parametrize("snippet", ["[judging]\noverall_min = nan\n", "[judging]\nrubric_mean_min = inf\n",
+                                     "[devils_advocate]\nmin_survival_confidence = nan\n",
+                                     "[judging.criterion_floors]\npayoff = nan\n", "[judging]\noverall_min = 11.0\n",
+                                     "[gates]\nmax_dead_air_s = nan\n"])
+def test_non_finite_or_out_of_range_thresholds_rejected(tmp_path, snippet):
+    f = tmp_path / "config.toml"
+    f.write_text(snippet)
+    with pytest.raises(ValidationError):
+        load_config(str(f))
+
+
+def test_missing_explicit_config_is_an_error(tmp_path, monkeypatch):
+    with pytest.raises(FileNotFoundError):
+        load_config(str(tmp_path / "nope.toml"))
+    monkeypatch.setenv("CLIP_SCANNER_CONFIG", str(tmp_path / "also-nope.toml"))
+    with pytest.raises(FileNotFoundError):
+        load_config()

@@ -91,6 +91,9 @@ def test_report_and_great_clip(first, env):
         assert first["cost"]["total_usd"] > 0
         return
     assert first["great_clips"], first["near_misses"]
+    # Offline runs are unmistakably labelled and kept out of the real output folder.
+    assert first["judge_backend"] == "scripted" and first["verdict"].startswith("[SCRIPTED TEST JUDGE")
+    assert next((env["tmp"] / "out").glob("*/report.json")).parent.name.endswith("-SCRIPTED-TEST")
     top = first["great_clips"][0]
     # The window must contain the planted payoff and start no earlier than its setup.
     assert top["start"] <= 18.0 and top["end"] >= 22.5, top
@@ -149,7 +152,7 @@ def test_rerun_is_cached_and_no_great_path_prunes_exports(first, env):
     after = json.loads((ws / "stages.json").read_text())
     for st in ("ingest", "transcribe", "signals", "candidates"):
         assert before[st]["completed_at"] == after[st]["completed_at"], st  # resumed, not recomputed
-    assert second["verdict"] == "NO GREAT CLIPS"
+    assert second["verdict"] == "[SCRIPTED TEST JUDGE, NOT REAL JUDGING] NO GREAT CLIPS"
     assert not second["great_clips"]
     assert 1 <= len(second["near_misses"]) <= 3
     assert all(n["reasons"] for n in second["near_misses"])

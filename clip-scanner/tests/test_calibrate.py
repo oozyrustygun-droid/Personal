@@ -67,3 +67,18 @@ def test_write_thresholds_preserves_comments(tmp_path):
     cfg = load_config(str(dst))
     assert cfg.judging.overall_min == 8.75 and cfg.judging.rubric_mean_min == 8.0
     assert cfg.devils_advocate.min_survival_confidence == 6.0
+
+
+def test_write_guard_refuses_small_sets_loosening_and_scripted():
+    """Review finding #2: --write-config used to lower the bar from 1 hit and 0 flops."""
+    from clip_scanner.calibrate import loosened, write_guard
+
+    tighter = {"overall_min": 8.75, "rubric_mean_min": 7.5, "min_survival_confidence": 7.0}
+    looser = {"overall_min": 8.5, "rubric_mean_min": 7.5, "min_survival_confidence": 5.0}
+    assert loosened(tighter, CFG) == [] and loosened(looser, CFG)
+    assert write_guard(tighter, CFG, hits=1, flops=0, scripted=False, allow_loosen=False)       # too little data
+    assert write_guard(tighter, CFG, hits=12, flops=12, scripted=True, allow_loosen=False)      # fake verdicts
+    assert write_guard(looser, CFG, hits=12, flops=12, scripted=False, allow_loosen=False)      # loosening
+    assert write_guard(looser, CFG, hits=12, flops=12, scripted=False, allow_loosen=True) is None
+    assert write_guard(tighter, CFG, hits=12, flops=12, scripted=False, allow_loosen=False) is None
+    assert write_guard(None, CFG, hits=12, flops=12, scripted=False, allow_loosen=True)

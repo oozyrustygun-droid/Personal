@@ -16,13 +16,13 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from .boundaries import snap_end, snap_start, split_sentences, start_point, straddles, tighten
+from .boundaries import apply_preroll, snap_end, snap_start, split_sentences, start_point, straddles, tighten
 from .cache import Workspace, fingerprint, read_json, write_json
 from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 6
+CANDIDATES_VERSION = 7
 
 
 @dataclass
@@ -210,6 +210,7 @@ def build_window(t_start: float, t_payoff: float, transcript: Transcript, senten
         segments = [(start, end)]
     if not segments:
         return None
+    segments = apply_preroll(segments, words, cuts, cfg.export.preroll_s)
     if straddles(words, segments[0][0]) or straddles(words, segments[-1][1]):
         return None
     removed = [(a[1], b[0]) for a, b in zip(segments, segments[1:])]
@@ -303,19 +304,24 @@ def candidates_stage(ws: Workspace, transcript: Transcript, sig: Signals, signal
                      cfg: Config, llm=None, *, console=None, force: bool = False) -> tuple[list[Candidate], str]:
     use_llm = cfg.candidates.llm_proposer and llm is not None
     fp = fingerprint("candidates", CANDIDATES_VERSION, cfg.section_hash("candidates", "gates"), signals_fp,
-                     use_llm and cfg.candidates.proposer_model)
+                     use_llm and cfg.candidates.proposer_model, cfg.export.preroll_s)
     out = ws.path("candidates.json")
     if not force and ws.is_done("candidates", fp, [out]):
-        return [Candidate.from_json(d) for d in read_json(out)["candidates"]], fp
-    proposals = []
+        cached = read_json(out)
+        # A proposer pass that failed (no credentials, rate limit) is retried instead of silently
+        # losing recall; its successful chunks come back from the response cache for free.
+        if not (use_llm and cached.get("proposer_incomplete")):
+            return [Candidate.from_json(d) for d in cached["candidates"]], fp
+    proposals, complete = [], True
     if use_llm:
         from .proposer import propose
 
-        proposals = propose(llm, transcript, duration, cfg, console=console)
+        proposals, complete = propose(llm, transcript, duration, cfg, console=console)
         if console:
-            console.print(f"  [dim]transcript proposer flagged {len(proposals)} moments[/dim]")
+            note = "" if complete else " (some chunks failed; will retry next run)"
+            console.print(f"  [dim]transcript proposer flagged {len(proposals)} moments{note}[/dim]")
     cands = generate(transcript, sig, duration, cfg, proposals)
-    write_json(out, {"candidates": [c.to_json() for c in cands],
+    write_json(out, {"candidates": [c.to_json() for c in cands], "proposer_incomplete": not complete,
                      "proposals": [p.model_dump() for p in proposals]})
     ws.mark_done("candidates", fp, count=len(cands))
     return cands, fp

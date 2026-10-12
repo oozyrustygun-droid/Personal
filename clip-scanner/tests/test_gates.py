@@ -28,8 +28,10 @@ def talk(sig, words_spec):
         while t + 0.3 <= b:
             words.append(Word(round(t, 2), round(t + 0.3, 2), "yo"))
             t += 0.4
-    for w in words:
-        sig.series["word_active"][int((w.start - 0.15) / HOP): int((w.end + 0.15) / HOP) + 1] = 1
+    from clip_scanner.signals import reaction_series
+
+    _, _, active = reaction_series(Transcript(words=words), len(sig.series["word_active"]))
+    sig.series["word_active"][:] = active
     return Transcript(words=words)
 
 
@@ -71,12 +73,21 @@ def test_hook_onset_counts_wordless_reaction():
 
 def test_dead_air_gate():
     sig = make_signals()
-    tr = talk(sig, [(10.0, 20.0), (21.9, 40.0)])  # ~1.9 s wordless gap minus padding ≈ 1.6 s dead
+    tr = talk(sig, [(10.0, 20.0), (21.5, 40.0)])  # last word ends 19.9, next starts 21.5: 1.6 s of silence
+    gap = 21.5 - max(w.end for w in tr.words if w.end <= 20.0)
     res = deterministic_gates(cand(10.0, 40.0), tr, sig, CFG)
-    assert not gate(res, "dead_air").passed
+    assert gap > 1.5 and not gate(res, "dead_air").passed, gap
     sig2 = make_signals()
-    tr2 = talk(sig2, [(10.0, 20.0), (21.4, 40.0)])  # ≈1.1 s
+    tr2 = talk(sig2, [(10.0, 20.0), (21.2, 40.0)])  # 1.3 s of silence
     assert gate(deterministic_gates(cand(10.0, 40.0), tr2, sig2, CFG), "dead_air").passed
+
+
+def test_dead_air_is_not_understated():
+    """Regression: word padding used to make ~1.9 s of real silence measure as 1.5 s."""
+    sig = make_signals()
+    tr = talk(sig, [(10.0, 20.0), (21.8, 40.0)])  # ~1.9 s of true silence
+    m = clip_measurements(cand(10.0, 40.0), tr, sig)
+    assert m["longest_dead_air"] >= 1.8
 
 
 def test_laughter_is_not_dead_air():
@@ -105,7 +116,25 @@ def test_music_bed_gate_and_unmeasured_fallback():
     sig_off = make_signals(events=False)
     tr_off = talk(sig_off, [(10.0, 40.0)])
     g = gate(deterministic_gates(cand(10.0, 40.0), tr_off, sig_off, CFG), "music_bed")
-    assert g.passed and "not measured" in g.detail
+    assert not g.passed and "not measured" in g.detail  # judges can't hear: unmeasured music fails closed
+    lax = Config.model_validate({"gates": {"require_music_check": False}})
+    assert gate(deterministic_gates(cand(10.0, 40.0), tr_off, sig_off, lax), "music_bed").passed
+
+
+def test_music_gate_uses_configured_threshold():
+    """Review finding #8: gates.music_prob used to be ignored (hard-coded 0.5)."""
+    sig = make_signals()
+    tr = talk(sig, [(10.0, 40.0)])
+    sig.series["music"][int(10 / HOP): int(40 / HOP)] = 0.45  # quiet music bed under the whole clip
+    assert gate(deterministic_gates(cand(10.0, 40.0), tr, sig, CFG), "music_bed").passed
+    strict = Config.model_validate({"gates": {"music_prob": 0.3}})
+    assert not gate(deterministic_gates(cand(10.0, 40.0), tr, sig, strict), "music_bed").passed
+
+
+def test_length_gate_compares_unrounded():
+    sig = make_signals()
+    tr = talk(sig, [(10.0, 70.1)])
+    assert not gate(deterministic_gates(cand(10.0, 70.004), tr, sig, CFG), "length").passed
 
 
 def test_no_speech_fails():

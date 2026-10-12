@@ -14,6 +14,7 @@ Plus scene-cut timestamps and silence gaps.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +26,7 @@ from .config import Config
 from .media import load_wav_mono, make_proxy
 from .transcribe import Transcript
 
-SIGNALS_VERSION = 4
+SIGNALS_VERSION = 5
 HOP = 0.1
 
 EVENT_GROUPS: dict[str, list[str]] = {
@@ -261,7 +262,13 @@ def reaction_series(transcript: Transcript, n_hops: int, hop: float = HOP) -> tu
             mark(i, 0.35)
         elif len(w.text) > 2 and w.text.isupper():
             mark(i, 0.5)
-        h0, h1 = max(0, int((w.start - 0.15) / hop)), min(n_hops, int((w.end + 0.15) / hop) + 1)
+        # Exact word spans (a hop counts if its centre is inside the word), no padding: padding would
+        # make real silence measure shorter than it is and let dead air slip past the gate.
+        h0 = max(0, math.ceil(w.start / hop - 0.5))
+        h1 = min(n_hops, math.floor(w.end / hop - 0.5) + 1)
+        if h1 <= h0:  # word shorter than a hop: mark the hop holding its midpoint
+            h0 = min(n_hops - 1, int(((w.start + w.end) / 2) / hop))
+            h1 = h0 + 1
         active[h0:h1] = 1.0
 
     mids = np.array([(w.start + w.end) / 2 for w in words])
