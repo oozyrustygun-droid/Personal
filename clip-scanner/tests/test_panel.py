@@ -299,3 +299,17 @@ def test_only_one_great_version_of_a_moment_is_kept():
     kept = one_per_moment(ranked, cands, cfg)
     assert [d.candidate_id for d in kept] == ["c01", "c03"]
     assert ranked[1].great is False and ranked[1].stage == "duplicate" and "c01" in ranked[1].reasons[0]
+
+
+def test_two_neighbouring_moments_are_both_kept():
+    """A's reaction-first window can overlap B's build-up a lot; they are still two moments."""
+    from clip_scanner.candidates import Candidate
+    from clip_scanner.judging.panel import Decision
+    from clip_scanner.judging.runner import one_per_moment
+
+    cfg = Config()
+    a = Candidate(id="c02", segments=[(99.48, 116.0)], peak=101.0, origin="signal", score=5, reason="")
+    b = Candidate(id="c03", segments=[(108.23, 123.7)], peak=119.3, origin="signal", score=4, reason="")
+    for order in (["c02", "c03"], ["c03", "c02"]):
+        ranked = [Decision(cid, True, "great", []) for cid in order]
+        assert [d.candidate_id for d in one_per_moment(ranked, {"c02": a, "c03": b}, cfg)] == order

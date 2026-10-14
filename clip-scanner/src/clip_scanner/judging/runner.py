@@ -278,10 +278,13 @@ def diagnose(decisions: list[Decision], ctx: JudgeContext) -> str:
 
 
 def same_moment(a: Candidate, b: Candidate, cfg: Config) -> bool:
-    """Two candidates are one moment if their peaks are close or they mostly overlap."""
+    """Two candidates are one moment if their peaks are close, or they mostly overlap AND each contains
+    the other's peak. (A reaction-first window running through its aftermath can overlap the next
+    moment's build-up a lot without being the same moment.)"""
     inter = max(0.0, min(a.end, b.end) - max(a.start, b.start))
-    return abs(a.peak - b.peak) <= cfg.candidates.peak_min_separation_s or \
+    return abs(a.peak - b.peak) <= cfg.candidates.peak_min_separation_s or (
         inter > 0.5 * min(a.end - a.start, b.end - b.start)
+        and a.start <= b.peak <= a.end and b.start <= a.peak <= b.end)
 
 
 def one_per_moment(ranked: list[Decision], by_id: dict[str, Candidate], cfg: Config) -> list[Decision]:
@@ -354,6 +357,10 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
 
     ordered = [decisions[c.id] for c in cands]
     great = one_per_moment(rank_great(ordered), {c.id: c for c in cands}, cfg)[:max_clips]
+    for d in ordered:
+        if d.stage == "duplicate" and console:
+            console.print(f"  {d.candidate_id} [dim]{d.reasons[0]}[/dim]")
+    emit("judging_done", great=len(great), duplicates=[d.candidate_id for d in ordered if d.stage == "duplicate"])
     status = "complete"
     if any(d.stage == "error" for d in ordered):
         judged_any = any(d.stage not in ("error", "deterministic_gates") for d in ordered)

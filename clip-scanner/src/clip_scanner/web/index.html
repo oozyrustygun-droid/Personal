@@ -316,7 +316,7 @@ async function loadHistory() {
 
 /* ---- results ------------------------------------------------------------------------------- */
 const PERSONA = { jaded_scroller: "scroller", joe_superfan: "superfan", shorts_editor: "editor" };
-const STAGE_LABEL = { deterministic_gates: "measured gate", panel: "judging panel", devils_advocate: "devil's advocate", error: "judging error" };
+const STAGE_LABEL = { deterministic_gates: "measured gate", panel: "judging panel", devils_advocate: "devil's advocate", error: "judging error", duplicate: "same moment as a higher-ranked GREAT clip", great: "GREAT (over the max clips limit)" };
 
 function clipCard(c, rep) {
   const poster = c.poster_url ? ` poster="${esc(c.poster_url)}"` : "";

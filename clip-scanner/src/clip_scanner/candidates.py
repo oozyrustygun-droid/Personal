@@ -31,7 +31,7 @@ from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 9
+CANDIDATES_VERSION = 10
 
 
 @dataclass
@@ -254,29 +254,33 @@ def _hook_window(g: dict, peak: float, payoff: float, own_end: float, back: floa
     hs = hook_first_start(peak, words, cuts, back)
     if hs > peak:
         return None
-    nxt = g.get("next")
-    # Where the next moment begins: its reaction, or its own reaction-first opening, whichever is first.
-    limit = None if nxt is None else min(activity_start(sig, nxt[0]), hook_first_start(nxt[0], words, cuts, back)) - 0.2
+    # Where each later moment begins (its reaction, or its own reaction-first opening, whichever is
+    # first) and where its payoff ends. A clip may end before a moment or after it, never inside it.
+    later = [(min(activity_start(sig, p), hook_first_start(p, words, cuts, back)) - 0.2, e)
+             for p, e in (g.get("later") or []) if p > peak]
+    nxt = later[0] if later else None
     for L in sorted(cc.target_lens_s) or [cc.min_len_s + 2.0]:
         t_end = max(payoff, hs + L)
-        if limit is not None and t_end + cc.snap_search_s >= limit:
-            # End on the last sentence before the next moment if that still makes a full clip, else run
-            # on through the next moment's payoff (two reactions in a row).
-            fits = [x.end for x in sentences if max(payoff, hs + cc.min_len_s) <= x.end <= limit - cc.end_tail_s]
-            t_end = fits[-1] if fits else max(t_end, nxt[1])
-        built = build_window(hs, t_end, transcript, sentences, sig, duration, cfg, floor=g.get("floor", 0.0),
-                             fixed_start=True)
-        if built is None:
-            continue
-        segments, removed = built
-        end = segments[-1][1]
-        if (segments[0][0], end) in seen or not segments[0][0] <= peak <= end:
-            continue
-        if limit is not None and limit < end < nxt[1]:
-            continue  # would stop inside the next moment, before its payoff
-        if not opens_on_moment(segments[0][0], peak, cfg):
-            continue  # tightening moved the start: it no longer opens on the moment
-        return heuristic_score(sig, segments, peak, g["strength"], own_end=own_end), segments, removed, False
+        tries = [t_end]
+        if nxt is not None and t_end + cc.snap_search_s >= nxt[0]:
+            # End on the last sentence before the next moment if that makes a full clip; otherwise (or if
+            # jump cuts shorten it too much) run on through the next moment's payoff.
+            fits = [x.end for x in sentences if max(payoff, hs + cc.min_len_s) <= x.end <= nxt[0] - cc.end_tail_s]
+            tries = fits[-1:] + [max(t_end, nxt[1])]
+        for t in tries:
+            built = build_window(hs, t, transcript, sentences, sig, duration, cfg, floor=g.get("floor", 0.0),
+                                 fixed_start=True)
+            if built is None:
+                continue
+            segments, removed = built
+            end = segments[-1][1]
+            if (segments[0][0], end) in seen or not segments[0][0] <= peak <= end:
+                continue
+            if any(lim < end < e for lim, e in later):
+                continue  # would stop inside a later moment, before its payoff
+            if not opens_on_moment(segments[0][0], peak, cfg):
+                continue  # tightening moved the start: it no longer opens on the moment
+            return heuristic_score(sig, segments, peak, g["strength"], own_end=own_end), segments, removed, False
     return None
 
 
@@ -338,15 +342,16 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         # clip's "setup", and the clip would contain two half-moments instead of one whole one.
         floor = ends[k - 1] + 0.2 if k > 0 and p - peaks[k - 1] < 60.0 else 0.0
         groups.append({"peak": p, "payoff": ends[k], "floor": min(floor, p - cc.min_len_s * 0.5),
-                       "next": (peaks[k + 1], ends[k + 1]) if k + 1 < len(peaks) else None,
+                       "later": list(zip(peaks[k + 1:], ends[k + 1:])),
                        "origin": "signal", "strength": 0, "kind": "", "why": "", "starts": None})
     for m in proposals or []:
-        # Same one-moment rule for transcript moments: not back past a reaction that ended before them.
-        prev = [e for p, e in zip(peaks, ends) if e < m.payoff_s - 0.5 and m.payoff_s - p < 60.0]
+        # Same one-moment rule for transcript moments: not back past a reaction that ended before the
+        # proposer's own start (a laugh inside the story's setup is part of the story).
+        prev = [e for p, e in zip(peaks, ends) if e <= m.start_s + 0.5 and m.payoff_s - p < 60.0]
         floor = max(0.0, min(max(prev) + 0.2, m.payoff_s - cc.min_len_s * 0.5)) if prev else 0.0
         later = [(p, e) for p, e in zip(peaks, ends) if p > max(m.payoff_s, m.end_s) + 0.5]
         groups.append({"peak": m.payoff_s, "origin": "llm", "strength": m.strength, "kind": m.kind, "why": m.why,
-                       "starts": [m.start_s], "end": m.end_s, "floor": floor, "next": later[0] if later else None})
+                       "starts": [m.start_s], "end": m.end_s, "floor": floor, "later": later})
 
     cuts = [float(c) for c in sig.scene_cuts]
     back = max(0.5, cfg.gates.hook_window_s - cfg.export.preroll_s - 0.1)

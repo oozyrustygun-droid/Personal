@@ -85,6 +85,8 @@ class Job:
             self.estimate = data
         elif kind == "judging":
             self.judging.update(total=data["total"], eligible=data["eligible"])
+        elif kind == "judging_done":
+            self.judging["great"] = data.get("great", self.judging["great"])  # after duplicates are dropped
         elif kind == "candidate":
             if data.get("stage") == "error":  # not judged (login, plan limit, a failed call)
                 self.judging["errors"] += 1

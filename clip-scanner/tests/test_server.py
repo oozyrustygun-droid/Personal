@@ -133,3 +133,14 @@ def test_friendly_errors():
     assert "signed-in" in friendly_error(DownloadError("ERROR: Sign in to confirm your age"))
     assert "private" in friendly_error(DownloadError("ERROR: Private video"))
     assert friendly_error(FileNotFoundError(2, "No such file", "/x.mp4")).startswith("File not found")
+
+
+def test_job_card_great_count_drops_duplicates():
+    from clip_scanner.server import Job
+
+    job = Job("https://youtu.be/x", None, True)
+    job.on_event("candidate", {"id": "c01", "stage": "great", "great": True})
+    job.on_event("candidate", {"id": "c02", "stage": "great", "great": True})   # same moment, other opening
+    job.on_event("candidate", {"id": "c03", "stage": "error", "great": False})
+    job.on_event("judging_done", {"great": 1, "duplicates": ["c02"]})
+    assert job.judging["great"] == 1 and job.judging["errors"] == 1 and job.judging["done"] == 2

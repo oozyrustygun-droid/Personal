@@ -253,3 +253,31 @@ def test_hook_first_start_never_cuts_a_word():
     long_word = [Word(11.0, 11.6, "aaaah")]
     t = hook_first_start(11.5, long_word, [], 0.2)      # 11.3 would cut into "aaaah"
     assert t <= 11.0 and not straddles(long_word, t)
+
+
+def test_close_next_reaction_and_dead_air_still_leave_a_reaction_first_version():
+    cfg = Config()
+    tr, sig = synthetic(peaks=(100.0, 118.0), dead=((104.0, 110.0),), react_at_peak=True)
+    cands = generate(tr, sig, sig.duration, cfg)
+    assert any(_on_reaction(c, 100.0, cfg) or _on_reaction(c, 101.0, cfg) for c in cands), \
+        [(c.start, c.end, c.peak) for c in cands]
+
+
+def test_never_ends_inside_any_later_reaction():
+    cfg = Config()
+    for peaks, dead in (((100.0, 110.0, 120.0), ((104.0, 109.0),)), ((100.0, 112.0, 122.0), ((104.0, 108.0),)),
+                        ((100.0, 112.0, 122.0), ((105.0, 108.0),))):
+        tr, sig = synthetic(peaks=peaks, dead=dead, react_at_peak=True)
+        for c in generate(tr, sig, sig.duration, cfg):
+            for p in peaks:
+                assert not (p - 1.0 < c.end < p + 2.5), (peaks, dead, c.start, c.end)
+
+
+def test_laugh_inside_a_story_setup_keeps_the_proposers_window():
+    from clip_scanner.proposer import Moment
+
+    cfg = Config()
+    tr, sig = synthetic(peaks=(88.0,), dead=(), react_at_peak=True)
+    m = Moment(start_s=80.0, end_s=102.0, payoff_s=100.0, kind="story", why="story", strength=3)
+    cands = generate(tr, sig, sig.duration, cfg, [m])
+    assert any(abs(c.start - 80.0) < 1.5 and c.end >= 100.0 for c in cands), [(c.start, c.end) for c in cands]
