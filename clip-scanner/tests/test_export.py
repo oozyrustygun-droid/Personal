@@ -167,3 +167,29 @@ def test_keg_only_ffmpeg_full_goes_first_on_path(tmp_path, monkeypatch):
     assert has_filter("ass")
     prefer_full_ffmpeg((str(full.parent),))  # idempotent
     assert os.environ["PATH"].split(os.pathsep).count(str(full.parent)) == 1
+
+
+def test_text_hook_is_drawn_at_the_top_for_the_whole_clip():
+    from clip_scanner.captions import TimedWord, build_ass, clean_title
+    from clip_scanner.config import Config
+
+    cfg = Config().captions
+    ass = build_ass([TimedWord(0.1, 0.4, "wait")], cfg, 1080, 1920, 15.0, title="He lost his wallet 💀 {\\b1}")
+    hook = [l for l in ass.splitlines() if l.startswith("Dialogue: 1,") and ",Hook," in l]
+    assert len(hook) == 1 and "0:00:00.00,0:00:15.00" in hook[0]
+    assert "HE LOST HIS WALLET (\\B1)" in hook[0] or "HE LOST HIS WALLET (B1)" in hook[0]
+    assert "💀" not in ass and "Style: Hook," in ass
+    assert clean_title("  a‍ b  ") == "a b"
+    assert "Dialogue: 1," not in build_ass([], cfg, 1080, 1920, 15.0)          # no hook, no title line
+
+
+def test_burned_hook_only_in_text_hook_mode():
+    from clip_scanner.config import Config
+    from clip_scanner.export import burned_hook
+
+    pkg = {"c01": {"caption_title": "Joe's flight from hell"}}
+    assert burned_hook(Config.model_validate({"judging": {"text_hook": False}}), pkg, "c01") == ""
+    on = Config.model_validate({"judging": {"text_hook": True}})
+    assert burned_hook(on, pkg, "c01") == "Joe's flight from hell"
+    off = Config.model_validate({"judging": {"text_hook": True}, "captions": {"burn_text_hook": False}})
+    assert burned_hook(off, pkg, "c01") == ""

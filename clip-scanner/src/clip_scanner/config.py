@@ -145,6 +145,10 @@ class JudgingCfg(_Section):
     backend: Literal["claude-code", "api"] = "claude-code"
     claude_code: ClaudeCodeCfg = ClaudeCodeCfg()
     model: str = "claude-opus-5-5"
+    # The account puts a short on-screen text hook over each clip. When true, the judges write that hook
+    # and judge the opening with it on screen (it may also supply one line of premise); the vertical
+    # export burns it in at the top. Every other gate and the 8.5 bar are unchanged.
+    text_hook: bool = True
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     judges: list[str] = ["jaded_scroller", "joe_superfan", "shorts_editor"]
     overall_min: float = 8.5
@@ -238,6 +242,9 @@ class ExportCfg(_Section):
 
 class CaptionsCfg(_Section):
     enabled: bool = True
+    burn_text_hook: bool = True       # with judging.text_hook: burn the hook in at the top of the vertical clip
+    hook_font_size: int = 66
+    hook_margin_v: int = 200          # distance of the hook from the top edge (px at 1080x1920)
     font: str = "Arial Black"
     font_size: int = 92
     bold: bool = True

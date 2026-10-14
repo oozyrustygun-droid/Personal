@@ -130,6 +130,8 @@ JUDGE_OUTPUT = """
 Judge the clip in the user message from your persona's perspective, following every rule above. You \
 judge independently and will never see the other judges' opinions.
 Fill every JSON field:
+- text_hook: the on-screen text hook for this clip (see the handbook; if this account doesn't use one, \
+write the hook you would use anyway: it does not count toward any gate).
 - first_two_seconds: literally what the viewer sees and hears in seconds 0-2.
 - gates: for each, the evidence (quote with clip time, or a frame), then passed.
 - scores: justification (1-3 sentences), then score.
@@ -170,8 +172,9 @@ PACKAGING_ROLE = """
 The clip in the user message passed the panel and survived the devil's advocate. Write its packaging:
 - hook_line: one line describing the opening beat that stops the scroll.
 - why_viral: one or two sentences on why it will travel (specific, not generic hype).
-- caption_title: the on-screen caption / title, AT MOST 8 words, in the account's voice (punchy, \
-no hashtags, no emojis unless they add meaning).
+- caption_title: the on-screen text hook / title shown over the clip, AT MOST 8 words, in the account's \
+voice (punchy, no hashtags, no emojis). Start from the judges' proposed text hooks in the panel notes; keep \
+it true to the clip and don't spoil the payoff.
 - posting_hook_text: the first line of the post description, written to pull the viewer in.
 - hashtags: 3-6 relevant hashtags (include #joebartolozzi)."""
 
@@ -187,8 +190,53 @@ def data_text(text: str) -> str:
     return text.replace("<", "‹").replace(">", "›")
 
 
-def handbook(style_guide: str) -> str:
-    return HANDBOOK + style_guide
+TEXT_HOOK_SECTION = """
+## On-screen text hook (this account uses one)
+Every clip this account posts carries a short text hook at the top of the screen from the first frame, \
+written by the account, e.g. "He lost his wallet on the 4th of July". You write it in text_hook before \
+judging: at most 10 words, true to what happens IN this clip, no promise the clip doesn't keep, no spoiler \
+that kills the payoff, no emojis. Judge the opening WITH that text on screen. The text can create the \
+curiosity gap and give ONE piece of premise (who, where, or what is going on). It cannot fix anything else: \
+silence, a mumbled or rambling start, a payoff that isn't in the clip, a story that needs more than one \
+line of setup, dead air, or a weak moment. A text hook that oversells a mediocre clip is a reason to reject \
+it, not to pass it.
+"""
+
+HOOK_GATE_STRICT = """1. hook_in_first_2s: within the first 1.5-2 seconds there is a line, reaction or visual that stops a \
+scrolling viewer. Fail on any slow wind-up: greetings, "so anyway", "okay chat", quietly reading chat, \
+silence, plain gameplay, or setup whose interest only arrives later."""
+
+HOOK_GATE_TEXT = """1. hook_in_first_2s: with your text_hook on screen, the first 1.5-2 seconds stop a scrolling \
+viewer: the text sets up a question the clip answers, and what is seen and heard in those seconds already \
+pulls into it (speech that is already in the story, a reaction, a striking visual). Fail if the opening \
+audio undercuts the text: silence, greetings, "so anyway", "okay chat", quietly reading chat, a mumbled or \
+off-topic start, or anything a viewer would swipe on even with the text."""
+
+STANDALONE_STRICT = """2. standalone: a viewer with zero context (never saw the stream, may not know Joe) understands what \
+is happening and why it is funny or shocking. Fail if it depends on earlier events, unexplained names, \
+running bits, or a stimulus the viewer can't see or hear in the clip."""
+
+STANDALONE_TEXT = """2. standalone: a viewer with zero context (never saw the stream, may not know Joe), given only your \
+text_hook as a one-line premise, understands what is happening and why it is funny or shocking. Fail if \
+it needs more than that one line: earlier events, unexplained names, running bits, or a stimulus the \
+viewer can't see or hear in the clip."""
+
+
+def handbook(style_guide: str, text_hook: bool = False) -> str:
+    """The shared judging handbook. text_hook: the account adds an on-screen text hook to every clip."""
+    if not text_hook:
+        return HANDBOOK + style_guide
+    text = HANDBOOK
+    for old, new in ((HOOK_GATE_STRICT, HOOK_GATE_TEXT), (STANDALONE_STRICT, STANDALONE_TEXT),
+                     ("- hook_strength: how hard the first 2 seconds stop the scroll.",
+                      "- hook_strength: how hard the first 2 seconds stop the scroll (text hook plus what is seen and heard)."),
+                     ("burned-in captions, and no other edits.", "burned-in captions, your text hook, and no other edits."),
+                     ("## Hard gates (one failure rejects the clip, whatever its scores)",
+                      TEXT_HOOK_SECTION.strip() + "\n\n## Hard gates (one failure rejects the clip, whatever its scores)")):
+        if old not in text:
+            raise RuntimeError(f"handbook text changed; can't apply the text-hook rule: {old[:60]!r}")
+        text = text.replace(old, new, 1)
+    return text + style_guide
 
 
 def transcript_block(duration: float, transcript: Transcript, cfg: Config, ttl: str) -> dict:

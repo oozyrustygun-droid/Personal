@@ -126,7 +126,8 @@ def build_report(a, result, cfg: Config, exported: dict | None = None, scripted:
         "bar": {"judges": j.judges, "model": j.model, "effort": j.effort, "overall_min": j.overall_min,
                 "rubric_mean_min": j.rubric_mean_min, "criterion_floors": j.criterion_floors,
                 "gate_policy": j.gate_policy, "devils_advocate": cfg.devils_advocate.enabled,
-                "min_survival_confidence": cfg.devils_advocate.min_survival_confidence},
+                "min_survival_confidence": cfg.devils_advocate.min_survival_confidence,
+                "text_hook": j.text_hook},
         "great_clips": [_clip_json(i, d, by_id[d.candidate_id], result.packaging.get(d.candidate_id, {}), exported)
                         for i, d in enumerate(result.great, 1)],
         "near_misses": [_reject_json(d, by_id[d.candidate_id]) for d in (near if not result.great else [])],
@@ -167,7 +168,9 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
               "",
               f"- **Hook:** {c['hook_line']}",
               f"- **Why it will go viral:** {c['why_viral']}",
-              f"- **On-screen caption / title:** {c['caption_title']}",
+              (f"- **On-screen text hook (burned in at the top of the vertical clip; the judges judged the "
+               f"opening with it):** {c['caption_title']}" if rep["bar"].get("text_hook")
+               else f"- **On-screen caption / title:** {c['caption_title']}"),
               f"- **Posting hook text:** {c['posting_hook_text']}",
               f"- **Hashtags:** {' '.join(c['hashtags'])}",
               f"- **Panel (effective scores):** {judges}",

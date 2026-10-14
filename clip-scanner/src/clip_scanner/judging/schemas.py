@@ -42,6 +42,8 @@ class Scores(BaseModel):
 
 
 class JudgeVerdict(BaseModel):
+    text_hook: str = Field("", description="The short on-screen text hook the account would put over the opening "
+                                           "(at most 10 words, true to the clip, no spoiler of the payoff).")
     first_two_seconds: str = Field(description="Exactly what a viewer sees and hears in the first 2 seconds.")
     gates: Gates
     scores: Scores

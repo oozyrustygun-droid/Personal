@@ -56,7 +56,8 @@ class JudgingResult:
 def build_context(cfg: Config, llm: LLM, transcript: Transcript, signals: Signals, frames, title: str,
                   uploader: str, duration: float) -> JudgeContext:
     return JudgeContext(cfg=cfg, llm=llm, transcript=transcript, signals=signals, frames=frames,
-                        handbook=prompts.handbook(load_style_guide()), duration=duration, title=title)
+                        handbook=prompts.handbook(load_style_guide(), cfg.judging.text_hook), duration=duration,
+                        title=title)
 
 
 def _meta(c: Candidate, ctx: JudgeContext, **extra) -> dict:
@@ -83,8 +84,9 @@ def _panel_summary(outcomes: list[JudgeOutcome]) -> str:
     parts = []
     for i, o in enumerate(outcomes, 1):
         v = o.verdict or {}
+        hook = f" Proposed on-screen text hook: \"{v['text_hook']}\"." if v.get("text_hook") else ""
         parts.append(f"Judge {i}: {v.get('overall_justification', '')} "
-                     f"(Their own biggest worry: {v.get('biggest_weakness', '')})")
+                     f"(Their own biggest worry: {v.get('biggest_weakness', '')}){hook}")
     return "\n".join(parts)
 
 
@@ -241,7 +243,8 @@ def package(c: Candidate, decision: Decision, ctx: JudgeContext) -> dict:
     measurements = clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), ctx.cfg)
     hooks = [jd.get("verdict", {}) or {} for jd in decision.judges]
-    notes = "\n".join(f"- {h.get('hook_line', '')} | {h.get('overall_justification', '')}" for h in hooks if h)
+    notes = "\n".join(f"- text hook: {h.get('text_hook', '')} | opening: {h.get('hook_line', '')} | "
+                      f"{h.get('overall_justification', '')}" for h in hooks if h)
     try:
         return ctx.llm.call(
             purpose="packaging", model=j.model,
@@ -253,7 +256,8 @@ def package(c: Candidate, decision: Decision, ctx: JudgeContext) -> dict:
     except LLMError as e:
         first = (hooks[0] if hooks else {}) or {}
         return {"hook_line": first.get("hook_line", ""), "why_viral": first.get("overall_justification", ""),
-                "caption_title": " ".join(first.get("hook_line", "").split()[:8]), "posting_hook_text": "",
+                "caption_title": " ".join((first.get("text_hook") or first.get("hook_line", "")).split()[:8]),
+                "posting_hook_text": "",
                 "hashtags": ["#joebartolozzi"], "error": str(e)}
 
 

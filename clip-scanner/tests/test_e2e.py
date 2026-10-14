@@ -42,7 +42,7 @@ def env(tmp_path_factory):
     cfg.write_text(
         f'[general]\ncache_dir = "{tmp / "cache"}"\noutput_dir = "{tmp / "out"}"\n'
         f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n'
-        '[judging]\nconfirm_above_usd = 1000.0\n')
+        '[judging]\nconfirm_above_usd = 1000.0\ntext_hook = true\n')
     great = tmp / "great.json"
     great.write_text(json.dumps(GREAT_RULES))
     dull = tmp / "dull.json"
@@ -116,6 +116,8 @@ def test_export_is_vertical_with_audio_and_tracks_face(first, env):
     assert any(s["codec_type"] == "audio" for s in info["streams"])
     dur = float(info["format"]["duration"])
     assert abs(dur - first["great_clips"][0]["duration"]) <= 0.45  # + pre-roll at most
+    sidecar = json.loads(path.with_suffix(".json").read_text())
+    assert sidecar["text_hook"] == first["great_clips"][0]["caption_title"]  # the hook is burned in
 
     raw = Path(first["great_clips"][0]["raw_file"])  # untouched landscape cut with handles, for editing
     rv = next(s for s in ffprobe(raw)["streams"] if s["codec_type"] == "video")

@@ -58,7 +58,7 @@ def make_script(rules: dict) -> ScriptFn:
         scores = {c: {"justification": "scripted", "score": score} for c in RUBRIC_CRITERIA}
         great = score >= 8.5 and all(v["passed"] for v in gates.values())
         first = " ".join(text.split()[:8])
-        return {"first_two_seconds": first, "gates": gates, "scores": scores, "biggest_weakness": "scripted",
+        return {"text_hook": f"Joe: {' '.join(text.split()[:6])}", "first_two_seconds": first, "gates": gates, "scores": scores, "biggest_weakness": "scripted",
                 "overall_justification": "scripted verdict", "overall": score, "hook_line": first,
                 "verdict": "GREAT" if great else "NOT_GREAT"}
 

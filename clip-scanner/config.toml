@@ -73,6 +73,9 @@ backend = "claude-code"        # claude-code: runs on your Claude subscription t
                                #   (no API credits; counts toward your plan's usage limits)
                                # api: Claude API with ANTHROPIC_API_KEY, billed per token
 model = "claude-opus-5-5"
+text_hook = true               # you add an on-screen text hook to each clip: the judges write it and judge the
+                               # opening with it on screen (one line of premise allowed); every other gate and the
+                               # 8.5 bar are unchanged. false = the footage's own first 2 s must hook.
 effort = "high"                # low | medium | high | xhigh | max
 judges = ["jaded_scroller", "joe_superfan", "shorts_editor"]
 overall_min = 8.5              # EVERY judge's overall rating must be >= this
@@ -129,6 +132,9 @@ raw_copy = true                # also save an untouched landscape cut (no crop/c
 raw_handles_s = 3.0            # extra footage before/after the clip in the raw cut, for trimming
 
 [captions]
+burn_text_hook = true          # with judging.text_hook: burn the hook in at the top of the vertical clip
+hook_font_size = 66
+hook_margin_v = 200            # px from the top edge
 enabled = true
 font = "Arial Black"           # any installed font; falls back via fontconfig
 font_size = 92

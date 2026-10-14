@@ -33,3 +33,16 @@ def test_same_model_accepts_only_alias_or_dated_snapshot():
     assert not same_model("claude-opus-5-5", "claude-opus-5")   # different model, same prefix
     assert not same_model("claude-sonnet-5-5", "claude-opus-5-5")
     assert not same_model("", "claude-opus-5-5")
+
+
+def test_text_hook_mode_changes_only_the_hook_rules():
+    from clip_scanner.judging import prompts
+
+    strict, text = prompts.handbook("STYLE", text_hook=False), prompts.handbook("STYLE", text_hook=True)
+    assert "with your text_hook on screen" in text and "with your text_hook on screen" not in strict
+    assert "given only your" in text and "## On-screen text hook" in text
+    assert "your text hook, and no other edits" in text
+    # every other gate and the absolute bar are word for word the same
+    for line in ("3. clear_payoff", "4. no_dead_air", "5. monetization_safe", "8.5 = THE BAR"):
+        assert strict.count(line) == text.count(line) == 1
+    assert text.endswith("STYLE") and strict.endswith("STYLE")

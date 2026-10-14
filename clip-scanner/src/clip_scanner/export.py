@@ -9,10 +9,11 @@ import tempfile
 from pathlib import Path
 
 from .cache import fingerprint, read_json, write_json
-from .captions import TimedWord, build_ass
+from .captions import TimedWord, build_ass, clean_title
 from .config import Config
 from .facetrack import shared_crop_path
-from .media import INSTALL_HINT, MediaError, captions_burnable, extract_frame, hwaccel_args, probe, require_binary
+from .media import (INSTALL_HINT, MediaError, captions_burnable, extract_frame, has_filter, hwaccel_args, probe,
+                    require_binary)
 from .ui import console
 
 
@@ -39,7 +40,14 @@ def crop_geometry(src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, 
     return src_w - src_w % 2, crop_h, max(0, (src_h - crop_h) // 2)
 
 
-def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
+def burned_hook(cfg: Config, packaging: dict, cand_id: str) -> str:
+    """The text hook burned in at the top of the vertical clip ('' when text-hook mode is off)."""
+    if not (cfg.judging.text_hook and cfg.captions.burn_text_hook):
+        return ""
+    return clean_title(packaging.get(cand_id, {}).get("caption_title", ""))
+
+
+def render_clip(a, cand, out_path: Path, cfg: Config, title: str = "") -> Path:
     require_binary("ffmpeg")
     src = a.meta.path
     info = probe(src)
@@ -62,9 +70,10 @@ def render_clip(a, cand, out_path: Path, cfg: Config) -> Path:
         tdp = Path(td)
         cmds = "\n".join(f"{t:.3f} crop@c x {x};" for t, x in path) + "\n"
         (tdp / "crop.cmd").write_text(cmds)
-        burn = captions_burnable(cfg)
+        burn = has_filter("ass") and (cfg.captions.enabled or bool(title))
         if burn:
-            ass = build_ass(timed_words(cand, a.transcript, segs), cfg.captions, ex.width, ex.height, total)
+            words = timed_words(cand, a.transcript, segs) if cfg.captions.enabled else []
+            ass = build_ass(words, cfg.captions, ex.width, ex.height, total, title=title)
             (tdp / "captions.ass").write_text(ass, encoding="utf-8")
         inputs: list[str] = []
         chains: list[str] = []
@@ -118,11 +127,11 @@ def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict, raw: bool
     return out_dir / "clips" / f"{rank:02d}-{slug(title)}-{cand_id}{'-raw' if raw else ''}.mp4"
 
 
-def render_fingerprint(a, cand, cfg: Config, kind: str = "vertical") -> str:
+def render_fingerprint(a, cand, cfg: Config, kind: str = "vertical", title: str = "") -> str:
     # The effective caption state counts: installing a libass ffmpeg later re-renders with captions.
     burned = captions_burnable(cfg) if kind == "vertical" else False
     return fingerprint("render", kind, a.meta.video_id, [list(s) for s in cand.segments],
-                       cfg.section_hash("export", "captions"), burned)
+                       cfg.section_hash("export", "captions"), burned, title if kind == "vertical" else "")
 
 
 def raw_window(a, cand, cfg: Config) -> tuple[float, float]:
@@ -154,7 +163,8 @@ def expected_files(out_dir: Path, a, result, cfg: Config) -> dict[str, str]:
     keep: dict[str, str] = {}
     for rank, d in enumerate(result.great, 1):
         c = by_id[d.candidate_id]
-        keep[str(clip_path(out_dir, rank, c.id, result.packaging))] = render_fingerprint(a, c, cfg)
+        keep[str(clip_path(out_dir, rank, c.id, result.packaging))] = render_fingerprint(
+            a, c, cfg, title=burned_hook(cfg, result.packaging, c.id))
         if cfg.export.raw_copy:
             keep[str(clip_path(out_dir, rank, c.id, result.packaging, raw=True))] = render_fingerprint(a, c, cfg, "raw")
     return keep
@@ -269,7 +279,9 @@ def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> 
         meta = {"segments": [list(s) for s in c.segments], "source": a.meta.source, "candidate": c.id}
         path = clip_path(out_dir, rank, c.id, result.packaging)
         try:
-            _render_cached(path, render_fingerprint(a, c, cfg), lambda: render_clip(a, c, path, cfg), meta, force)
+            hook = burned_hook(cfg, result.packaging, c.id)
+            _render_cached(path, render_fingerprint(a, c, cfg, title=hook),
+                           lambda: render_clip(a, c, path, cfg, title=hook), {**meta, "text_hook": hook}, force)
             info["vertical"] = str(path)
             poster = path.with_suffix(".jpg")
             if not poster.exists() or poster.stat().st_mtime < path.stat().st_mtime:
