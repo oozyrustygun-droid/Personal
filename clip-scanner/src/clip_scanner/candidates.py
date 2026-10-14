@@ -31,7 +31,7 @@ from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 8
+CANDIDATES_VERSION = 9
 
 
 @dataclass
@@ -141,6 +141,20 @@ def activity_end(sig: Signals, t: float, max_s: float = 10.0, frac: float = 0.5,
     return max(t, last_above * sig.hop)
 
 
+def activity_start(sig: Signals, t: float, max_s: float = 10.0, frac: float = 0.5) -> float:
+    """Where the high-interest region around a peak begins (the mirror of activity_end, no bridging)."""
+    x = sig.series["interest"]
+    i = sig.idx(t)
+    if i >= len(x):
+        return t
+    level = frac * float(x[i])
+    k = i
+    floor = max(0, i - int(max_s / sig.hop))
+    while k - 1 >= floor and x[k - 1] >= level:
+        k -= 1
+    return min(t, k * sig.hop)
+
+
 def reaction_tail(sig: Signals, t: float, max_s: float = 6.0, lookahead_s: float = 1.0) -> float:
     """End of a wordless reaction (laugh, scream, crowd) running at t or starting within lookahead_s."""
     mask = sig.reaction_mask()
@@ -178,11 +192,15 @@ def iou(a: tuple[float, float], b: tuple[float, float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def heuristic_score(sig: Signals, segments: list[tuple[float, float]], peak: float, llm_strength: int = 0) -> float:
+def heuristic_score(sig: Signals, segments: list[tuple[float, float]], peak: float, llm_strength: int = 0,
+                    own_end: float | None = None) -> float:
+    """own_end: score the peak and density only up to here, so a window that runs on into the next
+    moment doesn't borrow that moment's score."""
     start, end = segments[0][0], segments[-1][1]
     dur = sum(e - s for s, e in segments)
-    peak_val = sig.max_in("interest", start, end)
-    density = float(np.mean([sig.mean_in("interest", s, e) for s, e in segments]))
+    lim = end if own_end is None else max(start + 0.1, min(end, own_end))
+    peak_val = sig.max_in("interest", start, lim)
+    density = float(np.mean([sig.mean_in("interest", s, min(e, lim)) for s, e in segments if s < lim] or [0.0]))
     hook = sig.mean_in("interest", start, start + 2.0) + 0.5 * sig.max_in("reaction", start, start + 2.0)
     pos = (peak - start) / max(end - start, 1e-6)
     late = 1.0 if 0.4 <= pos <= 1.0 else 0.0
@@ -197,8 +215,8 @@ def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: 
 
     Prefers the earliest phrase start (a word after a pause of >= 0.25 s) in [peak - back_s, peak], so
     the line carrying the reaction is heard from its first word; else the earliest word start in that
-    range (on the moment, mid-phrase); else, for a wordless reaction, a point just before the peak that
-    doesn't cut into a word. Never inside a word."""
+    range (on the moment, mid-phrase); else, for a wordless reaction, a scene cut just before the peak
+    or a point just before it. Never inside a word."""
     starts = [w.start for w in words]
     lo, hi = bisect.bisect_left(starts, peak - back_s), bisect.bisect_right(starts, peak)
     in_range = list(range(lo, hi))
@@ -206,15 +224,60 @@ def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: 
     if phrase or in_range:
         return start_point(words, (phrase or in_range)[0], cuts)
     t = max(0.0, peak - min(0.6, back_s))
+    cut = next((float(c) for c in cuts if t <= c <= peak and not straddles(words, float(c))), None)
+    if cut is not None:  # open on the new shot rather than a flash of the previous one
+        return cut
     k = bisect.bisect_right(starts, t) - 1
     if k >= 0 and words[k].end > t:  # t falls inside a word: start before that word instead
         return start_point(words, k, cuts)
     return t
 
 
+HOOK_SLACK_S = 0.25  # a scene cut can pull a start up to ~0.5 s before its first word
+
+
 def opens_on_moment(start: float, peak: float, cfg: Config) -> bool:
-    """The clip's peak lands inside the hook window (allowing for the pre-roll)."""
-    return peak - start <= cfg.gates.hook_window_s + cfg.export.preroll_s
+    """The clip's peak lands inside the hook window. `start` is the clip's first frame (pre-roll included)."""
+    return 0.0 <= peak - start <= cfg.gates.hook_window_s + HOOK_SLACK_S
+
+
+def _hook_window(g: dict, peak: float, payoff: float, own_end: float, back: float, transcript: Transcript,
+                 sentences, sig: Signals, duration: float, cfg: Config, cuts: list[float], seen: set):
+    """The version of a moment that opens on it and runs on through the aftermath, or None.
+
+    Lengths are tried shortest first (jump-cut dead air after a reaction can push the short one under
+    the minimum). If the window would run into the next moment, it ends before it when that still
+    leaves a full-length clip, else it takes the next moment's payoff too (two reactions in a row):
+    never a clip that stops just as the next reaction lands."""
+    cc = cfg.candidates
+    words = transcript.words
+    hs = hook_first_start(peak, words, cuts, back)
+    if hs > peak:
+        return None
+    nxt = g.get("next")
+    # Where the next moment begins: its reaction, or its own reaction-first opening, whichever is first.
+    limit = None if nxt is None else min(activity_start(sig, nxt[0]), hook_first_start(nxt[0], words, cuts, back)) - 0.2
+    for L in sorted(cc.target_lens_s) or [cc.min_len_s + 2.0]:
+        t_end = max(payoff, hs + L)
+        if limit is not None and t_end + cc.snap_search_s >= limit:
+            # End on the last sentence before the next moment if that still makes a full clip, else run
+            # on through the next moment's payoff (two reactions in a row).
+            fits = [x.end for x in sentences if max(payoff, hs + cc.min_len_s) <= x.end <= limit - cc.end_tail_s]
+            t_end = fits[-1] if fits else max(t_end, nxt[1])
+        built = build_window(hs, t_end, transcript, sentences, sig, duration, cfg, floor=g.get("floor", 0.0),
+                             fixed_start=True)
+        if built is None:
+            continue
+        segments, removed = built
+        end = segments[-1][1]
+        if (segments[0][0], end) in seen or not segments[0][0] <= peak <= end:
+            continue
+        if limit is not None and limit < end < nxt[1]:
+            continue  # would stop inside the next moment, before its payoff
+        if not opens_on_moment(segments[0][0], peak, cfg):
+            continue  # tightening moved the start: it no longer opens on the moment
+        return heuristic_score(sig, segments, peak, g["strength"], own_end=own_end), segments, removed, False
+    return None
 
 
 def build_window(t_start: float, t_payoff: float, transcript: Transcript, sentences, sig: Signals,
@@ -275,44 +338,44 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         # clip's "setup", and the clip would contain two half-moments instead of one whole one.
         floor = ends[k - 1] + 0.2 if k > 0 and p - peaks[k - 1] < 60.0 else 0.0
         groups.append({"peak": p, "payoff": ends[k], "floor": min(floor, p - cc.min_len_s * 0.5),
+                       "next": (peaks[k + 1], ends[k + 1]) if k + 1 < len(peaks) else None,
                        "origin": "signal", "strength": 0, "kind": "", "why": "", "starts": None})
     for m in proposals or []:
+        # Same one-moment rule for transcript moments: not back past a reaction that ended before them.
+        prev = [e for p, e in zip(peaks, ends) if e < m.payoff_s - 0.5 and m.payoff_s - p < 60.0]
+        floor = max(0.0, min(max(prev) + 0.2, m.payoff_s - cc.min_len_s * 0.5)) if prev else 0.0
+        later = [(p, e) for p, e in zip(peaks, ends) if p > max(m.payoff_s, m.end_s) + 0.5]
         groups.append({"peak": m.payoff_s, "origin": "llm", "strength": m.strength, "kind": m.kind, "why": m.why,
-                       "starts": [m.start_s], "end": m.end_s})
+                       "starts": [m.start_s], "end": m.end_s, "floor": floor, "next": later[0] if later else None})
 
     cuts = [float(c) for c in sig.scene_cuts]
     back = max(0.5, cfg.gates.hook_window_s - cfg.export.preroll_s - 0.1)
     pool: list[tuple[Candidate, int, bool]] = []  # (candidate, moment index, primary version of its moment)
     for gi, g in enumerate(groups):
         peak = g["peak"]
-        variants = []
+        floor = g.get("floor", 0.0)
         payoff = max(peak, g.get("end", peak) - 0.5) if g["origin"] == "llm" else g["payoff"]
-        # Build-up variants are measured back from the payoff (so "14 s" really is a ~14 s clip).
-        targets = list(g["starts"] or [])
-        targets += [payoff - L for L in cc.target_lens_s]
+        own_end = max(payoff, reaction_tail(sig, payoff)) + 0.5
+        variants = []  # (score, segments, removed, from the proposer's own start)
         seen = set()
-        for ts in targets:
-            ts = max(0.0, ts)
-            built = build_window(ts, payoff, transcript, sentences, sig, duration, cfg, floor=g.get("floor", 0.0))
+        # Build-up variants are measured back from the payoff (so "14 s" really is a ~14 s clip).
+        targets = [(t, True) for t in (g["starts"] or [])] + [(payoff - L, False) for L in cc.target_lens_s]
+        for ts, proposed in targets:
+            built = build_window(max(0.0, ts), payoff, transcript, sentences, sig, duration, cfg, floor=floor)
             if built is None:
                 continue
             segments, removed = built
             key = (segments[0][0], segments[-1][1])
-            if key in seen:
-                continue
+            if key in seen or not segments[0][0] <= peak <= segments[-1][1]:
+                continue  # (tightening can trim a window off its own peak)
             seen.add(key)
-            score = heuristic_score(sig, segments, peak, g["strength"])
-            variants.append((score, segments, removed))
-        # The version that opens on the moment and runs on through the aftermath.
-        hook = None
-        hs = hook_first_start(peak, transcript.words, cuts, back)
-        built = build_window(hs, max(payoff, hs + cc.target_lens_s[0]), transcript, sentences, sig, duration, cfg,
-                             floor=g.get("floor", 0.0), fixed_start=True)
-        if built is not None and (built[0][0][0], built[0][-1][1]) not in seen:
-            hook = (heuristic_score(sig, built[0], peak, g["strength"]), built[0], built[1])
+            variants.append((heuristic_score(sig, segments, peak, g["strength"]), segments, removed, proposed))
+        hook = _hook_window(g, peak, payoff, own_end, back, transcript, sentences, sig, duration, cfg, cuts, seen)
         variants.sort(key=lambda v: -v[0])
         on_moment = [v for v in variants if opens_on_moment(v[1][0][0], peak, cfg)]
         build_up = [v for v in variants if not opens_on_moment(v[1][0][0], peak, cfg)]
+        if g["origin"] == "llm":  # the proposer's own window first: it chose where the setup starts
+            build_up.sort(key=lambda v: (not v[3], -v[0]))
         hook = hook or (on_moment[0] if on_moment else None)
         if hook is None:
             picked = variants[:2]
@@ -322,7 +385,7 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         else:
             # A reaction is the hook: lead with the version that opens on it.
             picked = [hook] + build_up[:1]
-        for rank, (score, segments, removed) in enumerate(picked):
+        for rank, (score, segments, removed, _) in enumerate(picked):
             reason = _describe(sig, segments, peak) if g["origin"] == "signal" else f"transcript: {g['why']}"
             if opens_on_moment(segments[0][0], peak, cfg):
                 reason += " (opens on the moment)"
@@ -334,15 +397,25 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
     # the same moment that open differently (on the reaction vs. on the build-up) are different clips.
     pool.sort(key=lambda t: -t[0].score)
     kept: list[tuple[Candidate, int, bool]] = []
+
+    def same_clip(a: Candidate, a_gi: int, b: Candidate, b_gi: int) -> bool:
+        if iou((a.start, a.end), (b.start, b.end)) <= cc.nms_iou:
+            return False
+        a_on, b_on = opens_on_moment(a.start, a.peak, cfg), opens_on_moment(b.start, b.peak, cfg)
+        if a_gi == b_gi and a_on != b_on:
+            return False  # one moment opening on its reaction vs. on its build-up
+        # A window that opens on its reaction is a different clip from one that opens seconds earlier.
+        return not ((a_on or b_on) and abs(a.start - b.start) > cfg.gates.hook_window_s)
+
     for c, gi, primary in pool:
-        c_on = opens_on_moment(c.start, c.peak, cfg)
-        dup = next((k for k in kept if iou((c.start, c.end), (k[0].start, k[0].end)) > cc.nms_iou
-                    and not (k[1] == gi and opens_on_moment(k[0].start, k[0].peak, cfg) != c_on)), None)
-        if dup is None:
+        k = next((n for n, (d, d_gi, _) in enumerate(kept) if same_clip(c, gi, d, d_gi)), None)
+        if k is None:
             kept.append((c, gi, primary))
             continue
-        d = dup[0]
-        if d.origin != c.origin and "+" not in d.origin:
+        d, d_gi, d_primary = kept[k]
+        if primary and not d_primary:
+            kept[k] = (d, d_gi, True)  # it now stands in for a moment's lead version
+        if abs(d.peak - c.peak) <= cc.peak_min_separation_s and d.origin != c.origin and "+" not in d.origin:
             d.origin = "signal+llm"
             if c.llm_why and not d.llm_why:
                 d.llm_kind, d.llm_why = c.llm_kind, c.llm_why

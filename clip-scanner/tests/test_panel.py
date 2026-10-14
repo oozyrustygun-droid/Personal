@@ -284,3 +284,18 @@ def test_devils_advocate_failure_is_incomplete_not_a_quality_verdict():
 def test_panel_rejection_keeps_devil_ruling_for_calibration_sweeps():
     d = decide("c1", DET_OK, panel(verdict(8.0), verdict(9), verdict(9)), SURVIVES, {"x": 1}, CFG)
     assert not d.great and d.arbiter == SURVIVES and d.devil == {"x": 1}
+
+
+def test_only_one_great_version_of_a_moment_is_kept():
+    from clip_scanner.candidates import Candidate
+    from clip_scanner.judging.panel import Decision
+    from clip_scanner.judging.runner import one_per_moment
+
+    cfg = Config()
+    cands = {"c01": Candidate(id="c01", segments=[(98.0, 115.0)], peak=100.0, origin="signal", score=5, reason=""),
+             "c02": Candidate(id="c02", segments=[(86.0, 102.0)], peak=100.0, origin="signal", score=4, reason=""),
+             "c03": Candidate(id="c03", segments=[(200.0, 220.0)], peak=205.0, origin="signal", score=3, reason="")}
+    ranked = [Decision(cid, True, "great", []) for cid in ("c01", "c02", "c03")]
+    kept = one_per_moment(ranked, cands, cfg)
+    assert [d.candidate_id for d in kept] == ["c01", "c03"]
+    assert ranked[1].great is False and ranked[1].stage == "duplicate" and "c01" in ranked[1].reasons[0]

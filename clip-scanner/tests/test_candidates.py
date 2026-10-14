@@ -8,8 +8,11 @@ from clip_scanner.signals import HOP, Signals
 from clip_scanner.transcribe import Transcript, Word
 
 
-def synthetic(duration=300.0, peaks=(60.0, 150.0, 240.0), dead=((100.0, 104.0),)):
-    """Talking every ~0.35 s with sentence ends every ~4 s; loud reactions at `peaks`."""
+def synthetic(duration=300.0, peaks=(60.0, 150.0, 240.0), dead=((100.0, 104.0),), react_at_peak=False,
+              strength=None):
+    """Talking every ~0.35 s with sentence ends every ~4 s; loud reactions at `peaks`.
+    react_at_peak: interest rises exactly where the laughter starts (a real reaction's shape), so the
+    reaction itself is the peak; strength: {peak: interest level}."""
     words, t, k = [], 0.5, 0
     while t < duration - 1:
         if any(s <= t < e for s, e in dead):
@@ -28,7 +31,11 @@ def synthetic(duration=300.0, peaks=(60.0, 150.0, 240.0), dead=((100.0, 104.0),)
         s["word_active"][int((w.start - 0.15) / HOP): int((w.end + 0.15) / HOP) + 1] = 1
     for p in peaks:
         i = int(p / HOP)
-        s["interest"][i - 20: i + 20] = 3.0
+        level = (strength or {}).get(p, 3.0)
+        if react_at_peak:
+            s["interest"][i: i + 25] = level
+        else:
+            s["interest"][i - 20: i + 20] = level
         s["laughter"][i: i + 25] = 0.9  # 2.5 s of laughter right after the payoff
     s["interest"] += 0.1
     sig = Signals(duration=duration, series=s, scene_cuts=np.array([], dtype=np.float32),
@@ -113,22 +120,113 @@ def test_window_does_not_span_two_moments():
     assert second and all(c.start >= 101.5 for c in second), [(c.start, c.end) for c in second]
 
 
+def _on_reaction(c, t, cfg):
+    """The clip opens on the reaction at source time t: it lands inside the hook window."""
+    return 0.0 <= t - c.start <= cfg.gates.hook_window_s + 0.25
+
+
 def test_every_reaction_gets_a_version_that_opens_on_it():
     """A hook in the first 2 s is a hard gate, so each reaction must be offered opening on the reaction."""
     from clip_scanner.judging.gates import deterministic_gates
 
     cfg = Config()
-    tr, sig = synthetic()
+    tr, sig = synthetic(react_at_peak=True)
     cands = generate(tr, sig, sig.duration, cfg)
     for p in (60.0, 150.0, 240.0):
-        on = [c for c in cands if c.start <= p <= c.end and opens_on_moment(c.start, c.peak, cfg)]
-        assert on, p
+        on = [c for c in cands if _on_reaction(c, p, cfg)]
+        assert on, (p, [(c.start, c.end, c.peak) for c in cands])
         for c in on:
-            assert c.peak - c.start <= cfg.gates.hook_window_s + cfg.export.preroll_s
             assert cfg.candidates.min_len_s <= c.duration <= cfg.candidates.max_len_s
             assert not straddles(tr.words, c.start) and not straddles(tr.words, c.end)
             hook = next(g for g in deterministic_gates(c, tr, sig, cfg) if g.name == "hook_onset")
             assert hook.passed, hook.detail
+
+
+def test_dead_air_after_the_reaction_still_leaves_a_version_that_opens_on_it():
+    cfg = Config()
+    for dead in (((113.0, 118.0),), ((114.0, 120.0),), ((112.0, 116.0), (117.0, 121.0))):
+        tr, sig = synthetic(peaks=(110.0,), dead=dead, react_at_peak=True)
+        cands = generate(tr, sig, sig.duration, cfg)
+        assert any(_on_reaction(c, 110.0, cfg) for c in cands), (dead, [(c.start, c.end) for c in cands])
+
+
+def test_a_reaction_first_clip_never_stops_as_the_next_reaction_lands():
+    cfg = Config()
+    for b in (110.0, 112.0, 114.0, 116.0, 118.0, 120.0, 125.0):
+        tr, sig = synthetic(peaks=(100.0, b), dead=(), react_at_peak=True)
+        for c in generate(tr, sig, sig.duration, cfg):
+            # it either ends before B's own reaction-first opening, or takes all of B's laughter
+            assert not (b - 1.0 < c.end < b + 2.5), (b, c.start, c.end)
+
+
+def test_transcript_moment_keeps_its_own_window_and_respects_the_floor():
+    from clip_scanner.proposer import Moment
+
+    cfg = Config()
+    tr, sig = synthetic(peaks=(150.0,), dead=(), react_at_peak=True)
+    m = Moment(start_s=185.0, end_s=198.0, payoff_s=196.0, kind="punchline", why="deadpan line", strength=3)
+    cands = [c for c in generate(tr, sig, sig.duration, cfg, [m]) if c.start <= 196.0 <= c.end]
+    assert cands and all(c.start >= 152.0 for c in cands), [(c.start, c.end) for c in cands]
+    assert any(abs(c.start - 185.0) < 1.0 for c in cands)  # the proposer's own window is judged
+
+
+def test_another_moments_window_does_not_remove_the_reaction_first_version():
+    from clip_scanner.proposer import Moment
+
+    cfg = Config()
+    tr, sig = synthetic(peaks=(100.0,), dead=(), react_at_peak=True)
+    m = Moment(start_s=84.0, end_s=110.0, payoff_s=107.0, kind="story", why="follow-up line", strength=3)
+    cands = generate(tr, sig, sig.duration, cfg, [m])
+    assert any(_on_reaction(c, 100.0, cfg) for c in cands), [(c.start, c.end, c.origin) for c in cands]
+
+
+def test_reaction_also_flagged_by_the_proposer_still_leads_with_its_reaction():
+    from clip_scanner.proposer import Moment
+
+    cfg = Config.model_validate({"candidates": {"alt_openings": False}})
+    tr, sig = synthetic(dead=(), react_at_peak=True)
+    m = Moment(start_s=138.0, end_s=153.0, payoff_s=150.0, kind="reaction", why="the bite", strength=4)
+    around = [c for c in generate(tr, sig, sig.duration, cfg, [m]) if c.start <= 150.0 <= c.end]
+    assert around and any(_on_reaction(c, 150.0, cfg) for c in around), [(c.start, c.end) for c in around]
+
+
+def test_wordless_reaction_opens_on_the_scene_cut():
+    words = [Word(96.0, 97.0, "okay")]
+    assert hook_first_start(100.3, words, [99.9], 1.6) == pytest.approx(99.9)
+
+
+def test_window_scores_only_its_own_moment():
+    from clip_scanner.candidates import heuristic_score
+
+    tr, sig = synthetic(peaks=(100.0, 111.0), dead=(), react_at_peak=True, strength={100.0: 1.2, 111.0: 6.0})
+    segs = [(99.0, 116.0)]
+    assert heuristic_score(sig, segs, 100.0, own_end=103.0) < heuristic_score(sig, segs, 100.0) - 3.0
+
+
+def test_fuzz_invariants():
+    """Random streams: every window is clean, bounded, contains its peak, and the budget holds."""
+    import random
+
+    from clip_scanner.proposer import Moment
+
+    cfg = Config()
+    for seed in range(60):
+        rng = random.Random(seed)
+        n = rng.randint(1, 6)
+        peaks = sorted({round(rng.uniform(20, 280), 1) for _ in range(n)})
+        dead = tuple((t, t + rng.uniform(0.5, 5.0)) for t in sorted(rng.uniform(10, 290) for _ in range(rng.randint(0, 4))))
+        tr, sig = synthetic(peaks=tuple(peaks), dead=dead, react_at_peak=rng.random() < 0.5)
+        props = [Moment(start_s=(a := rng.uniform(10, 260)), end_s=a + rng.uniform(12, 30),
+                        payoff_s=a + rng.uniform(8, 12), kind="other", why="x", strength=rng.randint(1, 5))
+                 for _ in range(rng.randint(0, 2))]
+        cands = generate(tr, sig, sig.duration, cfg, props)
+        assert len(cands) <= cfg.candidates.max_candidates
+        for c in cands:
+            assert cfg.candidates.min_len_s - 1e-6 <= c.duration <= cfg.candidates.max_len_s + 1e-6, (seed, c)
+            assert not straddles(tr.words, c.start) and not straddles(tr.words, c.end), (seed, c)
+            assert c.start <= c.peak <= c.end + 1e-6, (seed, c.start, c.peak, c.end)
+            if "(opens on the moment)" in c.reason:
+                assert opens_on_moment(c.start, c.peak, cfg), (seed, c)
 
 
 def test_reaction_first_version_wins_when_slots_are_tight():

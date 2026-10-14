@@ -16,7 +16,8 @@ from .ui import console, fmt_ts, fmt_usd
 
 PERSONA_SHORT = {"jaded_scroller": "scroller", "joe_superfan": "superfan", "shorts_editor": "editor"}
 STAGE_LABEL = {"deterministic_gates": "hard gate (measured)", "panel": "judging panel",
-               "devils_advocate": "devil's advocate", "error": "judging error", "great": "GREAT"}
+               "devils_advocate": "devil's advocate", "error": "judging error", "great": "GREAT",
+               "duplicate": "same moment as a higher-ranked GREAT clip"}
 
 
 SCRIPTED_BANNER = "SCRIPTED TEST JUDGE, NOT REAL JUDGING"

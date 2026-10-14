@@ -277,6 +277,28 @@ def diagnose(decisions: list[Decision], ctx: JudgeContext) -> str:
         return f"Most candidates died at the {common.replace('_', ' ')} stage; no moment cleared every gate and the 8.5 bar."
 
 
+def same_moment(a: Candidate, b: Candidate, cfg: Config) -> bool:
+    """Two candidates are one moment if their peaks are close or they mostly overlap."""
+    inter = max(0.0, min(a.end, b.end) - max(a.start, b.start))
+    return abs(a.peak - b.peak) <= cfg.candidates.peak_min_separation_s or \
+        inter > 0.5 * min(a.end - a.start, b.end - b.start)
+
+
+def one_per_moment(ranked: list[Decision], by_id: dict[str, Candidate], cfg: Config) -> list[Decision]:
+    """Each moment is judged in up to two versions (opening on the reaction, opening on the build-up).
+    If both are GREAT, keep the higher-ranked one; the other is marked as a duplicate, never exported."""
+    kept: list[Decision] = []
+    for d in ranked:
+        twin = next((k for k in kept if same_moment(by_id[d.candidate_id], by_id[k.candidate_id], cfg)), None)
+        if twin is None:
+            kept.append(d)
+            continue
+        d.great, d.stage = False, "duplicate"
+        d.reasons = [f"GREAT, but the same moment as {twin.candidate_id}, which ranked higher "
+                     "(only one version of a moment is kept)"]
+    return kept
+
+
 def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, console=None,
                 full_panel: bool = False, on_estimate=None, recall_complete: bool = True) -> JudgingResult:
     """recall_complete=False: candidate generation was cut short (the transcript proposer couldn't read
@@ -331,7 +353,7 @@ def run_judging(cands: list[Candidate], ctx: JudgeContext, *, max_clips: int, co
         notes.append(f"Judging stopped: {str(fatal).split(': ', 1)[-1]}")
 
     ordered = [decisions[c.id] for c in cands]
-    great = rank_great(ordered)[:max_clips]
+    great = one_per_moment(rank_great(ordered), {c.id: c for c in cands}, cfg)[:max_clips]
     status = "complete"
     if any(d.stage == "error" for d in ordered):
         judged_any = any(d.stage not in ("error", "deterministic_gates") for d in ordered)
