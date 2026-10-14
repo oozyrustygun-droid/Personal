@@ -3,9 +3,15 @@
 Sources of candidates:
   * peaks of the interest curve (loudness spikes, laughter, screams, reaction words, cuts);
   * optional transcript proposals from a cheap model (deadpan/verbal moments).
-For each source moment we try several window lengths that END just after the payoff (plus any
-wordless reaction tail), snap both edges with `boundaries`, jump-cut long dead air, score the
-variants heuristically, de-duplicate overlapping windows, and keep the best N.
+For each source moment we build two kinds of window:
+  * one that OPENS ON the moment (the phrase with the reaction lands inside the 2-second hook window,
+    then the clip runs on through the aftermath), because a hook in the first two seconds is a hard
+    gate and a reaction is usually the best hook a moment has;
+  * build-up windows of several lengths that END just after the payoff (plus any wordless reaction
+    tail), for moments whose setup is the hook.
+Edges are snapped with `boundaries`, long dead air is jump-cut, variants are scored heuristically,
+overlapping windows are de-duplicated (two openings of the same moment are different clips), and
+the best moments are kept, each in its most hook-friendly version first.
 
 This stage is deliberately generous. Precision is the judges' job.
 """
@@ -14,15 +20,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+import bisect
+
 import numpy as np
 
-from .boundaries import apply_preroll, snap_end, snap_start, split_sentences, start_point, straddles, tighten
+from .boundaries import (apply_preroll, gap_before, snap_end, snap_start, split_sentences, start_point, straddles,
+                         tighten)
 from .cache import Workspace, fingerprint, read_json, write_json
 from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 7
+CANDIDATES_VERSION = 8
 
 
 @dataclass
@@ -183,15 +192,46 @@ def heuristic_score(sig: Signals, segments: list[tuple[float, float]], peak: flo
 
 # ---- generation -----------------------------------------------------------------------------
 
+def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: float) -> float:
+    """A start that opens ON the moment, so the peak lands within `back_s` of the first frame.
+
+    Prefers the earliest phrase start (a word after a pause of >= 0.25 s) in [peak - back_s, peak], so
+    the line carrying the reaction is heard from its first word; else the earliest word start in that
+    range (on the moment, mid-phrase); else, for a wordless reaction, a point just before the peak that
+    doesn't cut into a word. Never inside a word."""
+    starts = [w.start for w in words]
+    lo, hi = bisect.bisect_left(starts, peak - back_s), bisect.bisect_right(starts, peak)
+    in_range = list(range(lo, hi))
+    phrase = [k for k in in_range if gap_before(words, k) >= 0.25]
+    if phrase or in_range:
+        return start_point(words, (phrase or in_range)[0], cuts)
+    t = max(0.0, peak - min(0.6, back_s))
+    k = bisect.bisect_right(starts, t) - 1
+    if k >= 0 and words[k].end > t:  # t falls inside a word: start before that word instead
+        return start_point(words, k, cuts)
+    return t
+
+
+def opens_on_moment(start: float, peak: float, cfg: Config) -> bool:
+    """The clip's peak lands inside the hook window (allowing for the pre-roll)."""
+    return peak - start <= cfg.gates.hook_window_s + cfg.export.preroll_s
+
+
 def build_window(t_start: float, t_payoff: float, transcript: Transcript, sentences, sig: Signals,
-                 duration: float, cfg: Config, floor: float = 0.0,
+                 duration: float, cfg: Config, floor: float = 0.0, fixed_start: bool = False,
                  ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
     """Snap one (start target, payoff) pair into clean segments, or None if it can't be made valid.
-    `floor`: earliest allowed start (the end of the previous moment), so one clip = one moment."""
+    `floor`: earliest allowed start (the end of the previous moment), so one clip = one moment.
+    `fixed_start`: t_start is already a clean edit point (see hook_first_start); don't move it."""
     cc = cfg.candidates
     words = transcript.words
     cuts = [float(c) for c in sig.scene_cuts]
-    s = snap_start(max(t_start, floor), words, sentences, cuts, cc.snap_search_s)
+    if fixed_start:
+        if t_start < floor - 0.3:
+            return None
+        s = (t_start, None)
+    else:
+        s = snap_start(max(t_start, floor), words, sentences, cuts, cc.snap_search_s)
     if s is not None and s[0] < floor - 0.3:
         later = [w for w in sentences if w.start >= floor - 0.3 and w.start < t_payoff]
         s = (start_point(words, later[0].i0, cuts), later[0].i0) if later else None
@@ -240,15 +280,16 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
         groups.append({"peak": m.payoff_s, "origin": "llm", "strength": m.strength, "kind": m.kind, "why": m.why,
                        "starts": [m.start_s], "end": m.end_s})
 
-    pool: list[Candidate] = []
-    for g in groups:
+    cuts = [float(c) for c in sig.scene_cuts]
+    back = max(0.5, cfg.gates.hook_window_s - cfg.export.preroll_s - 0.1)
+    pool: list[tuple[Candidate, int, bool]] = []  # (candidate, moment index, primary version of its moment)
+    for gi, g in enumerate(groups):
         peak = g["peak"]
         variants = []
         payoff = max(peak, g.get("end", peak) - 0.5) if g["origin"] == "llm" else g["payoff"]
-        # Length variants are measured back from the payoff (so "14 s" really is a ~14 s clip), plus a
-        # cold open that starts just before the peak, for moments where the peak itself is the hook.
+        # Build-up variants are measured back from the payoff (so "14 s" really is a ~14 s clip).
         targets = list(g["starts"] or [])
-        targets += [payoff - L for L in cc.target_lens_s] + [peak - 3.0]
+        targets += [payoff - L for L in cc.target_lens_s]
         seen = set()
         for ts in targets:
             ts = max(0.0, ts)
@@ -262,26 +303,69 @@ def generate(transcript: Transcript, sig: Signals, duration: float, cfg: Config,
             seen.add(key)
             score = heuristic_score(sig, segments, peak, g["strength"])
             variants.append((score, segments, removed))
+        # The version that opens on the moment and runs on through the aftermath.
+        hook = None
+        hs = hook_first_start(peak, transcript.words, cuts, back)
+        built = build_window(hs, max(payoff, hs + cc.target_lens_s[0]), transcript, sentences, sig, duration, cfg,
+                             floor=g.get("floor", 0.0), fixed_start=True)
+        if built is not None and (built[0][0][0], built[0][-1][1]) not in seen:
+            hook = (heuristic_score(sig, built[0], peak, g["strength"]), built[0], built[1])
         variants.sort(key=lambda v: -v[0])
-        for score, segments, removed in variants[:2]:
+        on_moment = [v for v in variants if opens_on_moment(v[1][0][0], peak, cfg)]
+        build_up = [v for v in variants if not opens_on_moment(v[1][0][0], peak, cfg)]
+        hook = hook or (on_moment[0] if on_moment else None)
+        if hook is None:
+            picked = variants[:2]
+        elif g["origin"] == "llm":
+            # A transcript moment (a story, a punchline) usually needs its setup: lead with the build-up.
+            picked = build_up[:1] + [hook] if build_up else [hook]
+        else:
+            # A reaction is the hook: lead with the version that opens on it.
+            picked = [hook] + build_up[:1]
+        for rank, (score, segments, removed) in enumerate(picked):
             reason = _describe(sig, segments, peak) if g["origin"] == "signal" else f"transcript: {g['why']}"
-            pool.append(Candidate(id="", segments=segments, peak=round(peak, 2), origin=g["origin"], score=score,
-                                  reason=reason, llm_kind=g["kind"], llm_why=g["why"], removed_gaps=removed))
+            if opens_on_moment(segments[0][0], peak, cfg):
+                reason += " (opens on the moment)"
+            pool.append((Candidate(id="", segments=segments, peak=round(peak, 2), origin=g["origin"], score=score,
+                                   reason=reason, llm_kind=g["kind"], llm_why=g["why"], removed_gaps=removed),
+                         gi, rank == 0))
 
-    # De-duplicate: keep the higher-scoring of overlapping windows, merging provenance.
-    pool.sort(key=lambda c: -c.score)
-    kept: list[Candidate] = []
-    for c in pool:
-        dup = next((k for k in kept if iou((c.start, c.end), (k.start, k.end)) > cc.nms_iou), None)
+    # De-duplicate: keep the higher-scoring of overlapping windows, merging provenance. Two versions of
+    # the same moment that open differently (on the reaction vs. on the build-up) are different clips.
+    pool.sort(key=lambda t: -t[0].score)
+    kept: list[tuple[Candidate, int, bool]] = []
+    for c, gi, primary in pool:
+        c_on = opens_on_moment(c.start, c.peak, cfg)
+        dup = next((k for k in kept if iou((c.start, c.end), (k[0].start, k[0].end)) > cc.nms_iou
+                    and not (k[1] == gi and opens_on_moment(k[0].start, k[0].peak, cfg) != c_on)), None)
         if dup is None:
-            kept.append(c)
-        elif dup.origin != c.origin and "+" not in dup.origin:
-            dup.origin = "signal+llm"
-            if c.llm_why and not dup.llm_why:
-                dup.llm_kind, dup.llm_why = c.llm_kind, c.llm_why
+            kept.append((c, gi, primary))
+            continue
+        d = dup[0]
+        if d.origin != c.origin and "+" not in d.origin:
+            d.origin = "signal+llm"
+            if c.llm_why and not d.llm_why:
+                d.llm_kind, d.llm_why = c.llm_kind, c.llm_why
 
+    # Keep the best moments, each in its primary version, then add the other opening of those moments
+    # while there is room (alt_openings).
     target_n = int(np.clip(round(duration / 90.0), cc.min_candidates, cc.max_candidates))
-    chosen = sorted(kept[:target_n], key=lambda c: c.start)
+    by_moment: dict[int, list[tuple[Candidate, bool]]] = {}
+    for c, gi, primary in kept:  # score order
+        by_moment.setdefault(gi, []).append((c, primary))
+    moments = sorted(by_moment, key=lambda gi: -max(c.score for c, _ in by_moment[gi]))[:target_n]
+    chosen: list[Candidate] = []
+    extras: list[Candidate] = []
+    for gi in moments:
+        versions = sorted(by_moment[gi], key=lambda v: (not v[1], -v[0].score))
+        chosen.append(versions[0][0])
+        extras += [c for c, _ in versions[1:]]
+    if cc.alt_openings:
+        for c in sorted(extras, key=lambda c: -c.score):
+            if len(chosen) >= cc.max_candidates:
+                break
+            chosen.append(c)
+    chosen = sorted(chosen, key=lambda c: c.start)
     for i, c in enumerate(chosen, 1):
         c.id = f"c{i:02d}"
     return chosen

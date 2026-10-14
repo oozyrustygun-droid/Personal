@@ -105,6 +105,9 @@ class CandidatesCfg(_Section):
     snap_search_s: float = 6.0
     end_tail_s: float = 0.35
     nms_iou: float = 0.5
+    # Also judge the build-up version of a moment next to the version that opens on it. More recall,
+    # about twice the judge calls on videos under ~an hour (longer ones are capped at max_candidates).
+    alt_openings: bool = True
 
 
 class GatesCfg(_Section):

@@ -55,6 +55,8 @@ pause_break_s = 0.7                    # word gap that counts as a sentence/beat
 snap_search_s = 6.0                    # how far a boundary may move to land on a sentence edge
 end_tail_s = 0.35                      # breathing room after the last word (never into the next word)
 nms_iou = 0.5                          # overlapping candidates above this IoU are de-duplicated
+alt_openings = true                    # judge each moment both opening ON the reaction and with its build-up
+                                       # (more recall; about 2x judge calls on videos under ~1 h)
 
 [gates]
 # Deterministic gates run before any API spend. Failing one rejects the clip.

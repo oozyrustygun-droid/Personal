@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from clip_scanner.boundaries import straddles
-from clip_scanner.candidates import Candidate, find_peaks, generate, iou
+from clip_scanner.candidates import Candidate, find_peaks, generate, hook_first_start, iou, opens_on_moment
 from clip_scanner.config import Config
 from clip_scanner.signals import HOP, Signals
 from clip_scanner.transcribe import Transcript, Word
@@ -58,12 +58,15 @@ def test_generate_windows_are_clean_and_cover_payoffs():
 
 
 def test_generate_dedups_overlaps():
+    """Overlapping windows are de-duplicated, except two versions of one moment that open differently."""
     cfg = Config()
     tr, sig = synthetic()
     cands = generate(tr, sig, sig.duration, cfg)
     for i, a in enumerate(cands):
         for b in cands[i + 1:]:
-            assert iou((a.start, a.end), (b.start, b.end)) <= cfg.candidates.nms_iou + 1e-9
+            if iou((a.start, a.end), (b.start, b.end)) > cfg.candidates.nms_iou + 1e-9:
+                assert a.peak == b.peak
+                assert opens_on_moment(a.start, a.peak, cfg) != opens_on_moment(b.start, b.peak, cfg)
 
 
 def test_dead_air_inside_window_is_jump_cut():
@@ -108,3 +111,47 @@ def test_window_does_not_span_two_moments():
         assert not (c.start < 101.0 and c.end > 129.0), (c.start, c.end)
     second = [c for c in cands if c.start < 130.0 <= c.end]
     assert second and all(c.start >= 101.5 for c in second), [(c.start, c.end) for c in second]
+
+
+def test_every_reaction_gets_a_version_that_opens_on_it():
+    """A hook in the first 2 s is a hard gate, so each reaction must be offered opening on the reaction."""
+    from clip_scanner.judging.gates import deterministic_gates
+
+    cfg = Config()
+    tr, sig = synthetic()
+    cands = generate(tr, sig, sig.duration, cfg)
+    for p in (60.0, 150.0, 240.0):
+        on = [c for c in cands if c.start <= p <= c.end and opens_on_moment(c.start, c.peak, cfg)]
+        assert on, p
+        for c in on:
+            assert c.peak - c.start <= cfg.gates.hook_window_s + cfg.export.preroll_s
+            assert cfg.candidates.min_len_s <= c.duration <= cfg.candidates.max_len_s
+            assert not straddles(tr.words, c.start) and not straddles(tr.words, c.end)
+            hook = next(g for g in deterministic_gates(c, tr, sig, cfg) if g.name == "hook_onset")
+            assert hook.passed, hook.detail
+
+
+def test_reaction_first_version_wins_when_slots_are_tight():
+    cfg = Config.model_validate({"candidates": {"min_candidates": 3, "max_candidates": 3}})
+    tr, sig = synthetic()
+    cands = generate(tr, sig, sig.duration, cfg)
+    assert len(cands) == 3 and all(opens_on_moment(c.start, c.peak, cfg) for c in cands)
+    only = generate(tr, sig, sig.duration, Config.model_validate({"candidates": {"alt_openings": False}}))
+    assert len({c.peak for c in only}) == len(only)  # one version per moment
+
+
+def test_hook_first_start_never_cuts_a_word():
+    # continuous talk ("...and so then") with no pause, a 0.6 s pause, then the reaction "OH NO"
+    words = [Word(9.5, 9.9, "and"), Word(9.95, 10.3, "so"), Word(10.35, 10.6, "then"), Word(11.2, 11.5, "OH"),
+             Word(11.55, 11.9, "NO")]
+    # the earliest phrase start (a word after a pause) inside the window before the peak: "OH"
+    assert abs(hook_first_start(11.6, words, [], 1.6) - (11.2 - 0.08)) < 1e-6
+    # no phrase start in range: the earliest word in range ("then"), still a clean word edge
+    t = hook_first_start(10.5, words, [], 0.3)
+    assert abs(t - (10.35 - 0.05)) < 1e-6 and not straddles(words, t)   # 0.05 s after "so" ends
+    # wordless reaction (a scream) long after the last word: just before the peak
+    assert abs(hook_first_start(20.0, words, [], 1.6) - 19.4) < 1e-6
+    # target inside a long word: move to that word's start
+    long_word = [Word(11.0, 11.6, "aaaah")]
+    t = hook_first_start(11.5, long_word, [], 0.2)      # 11.3 would cut into "aaaah"
+    assert t <= 11.0 and not straddles(long_word, t)
