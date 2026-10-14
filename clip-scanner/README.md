@@ -180,6 +180,18 @@ effort = "medium"          # lighter on your plan's usage
 | `[judging] effort` / `model` | high / claude-opus-5-5 | quality vs. usage/cost |
 | `[judging] backend` | `claude-code` | `claude-code` = your Claude subscription; `api` = API credits |
 
+## Text hooks (on by default)
+
+Clip accounts put a short text hook on screen ("He lost his wallet on the 4th of July"), and this account
+does too, so the panel judges each clip with one (`[judging] text_hook = true`). The first judge writes the
+hook: at most 10 words, true to the clip, no spoiler. The other two judges, the devil's advocate and the
+arbiter all judge the clip with exactly that hook on screen. The hook can set up the question and give one
+line of premise; it can't excuse a slow or silent opening, a missing payoff, dead air or a weak moment, and
+an oversold hook counts against the clip. The vertical export burns that same hook in at the top (the raw
+cut stays clean). This needs `ffmpeg-full` (libass); without it the vertical export is refused rather than
+posted without the hook the judges relied on. Set `text_hook = false` (in `config.local.toml`) to require
+the footage itself to hook in the first 2 seconds.
+
 ## Cost and usage
 
 **On your Claude subscription (default)** there are no API charges. Each scan counts toward your plan's

@@ -70,6 +70,10 @@ def render_clip(a, cand, out_path: Path, cfg: Config, title: str = "") -> Path:
         tdp = Path(td)
         cmds = "\n".join(f"{t:.3f} crop@c x {x};" for t, x in path) + "\n"
         (tdp / "crop.cmd").write_text(cmds)
+        if title and not has_filter("ass"):
+            # The judges judged the opening with this text on screen: never post the clip without it.
+            raise MediaError(f"can't burn the on-screen text hook the judges relied on (this ffmpeg has no "
+                             f"libass). Fix: {INSTALL_HINT}, then re-run.")
         burn = has_filter("ass") and (cfg.captions.enabled or bool(title))
         if burn:
             words = timed_words(cand, a.transcript, segs) if cfg.captions.enabled else []
@@ -129,7 +133,7 @@ def clip_path(out_dir: Path, rank: int, cand_id: str, packaging: dict, raw: bool
 
 def render_fingerprint(a, cand, cfg: Config, kind: str = "vertical", title: str = "") -> str:
     # The effective caption state counts: installing a libass ffmpeg later re-renders with captions.
-    burned = captions_burnable(cfg) if kind == "vertical" else False
+    burned = (captions_burnable(cfg) or (bool(title) and has_filter("ass"))) if kind == "vertical" else False
     return fingerprint("render", kind, a.meta.video_id, [list(s) for s in cand.segments],
                        cfg.section_hash("export", "captions"), burned, title if kind == "vertical" else "")
 
@@ -283,6 +287,7 @@ def export_clips(a, result, cfg: Config, out_dir: Path, force: bool = False) -> 
             _render_cached(path, render_fingerprint(a, c, cfg, title=hook),
                            lambda: render_clip(a, c, path, cfg, title=hook), {**meta, "text_hook": hook}, force)
             info["vertical"] = str(path)
+            info["text_hook_burned"] = bool(hook)
             poster = path.with_suffix(".jpg")
             if not poster.exists() or poster.stat().st_mtime < path.stat().st_mtime:
                 make_poster(path, poster, min(1.0, c.duration / 2))

@@ -319,7 +319,6 @@ const PERSONA = { jaded_scroller: "scroller", joe_superfan: "superfan", shorts_e
 const STAGE_LABEL = { deterministic_gates: "measured gate", panel: "judging panel", devils_advocate: "devil's advocate", error: "judging error", duplicate: "same moment as a higher-ranked GREAT clip", great: "GREAT (over the max clips limit)" };
 
 function clipCard(c, rep) {
-  const textHook = !!(rep && rep.bar && rep.bar.text_hook);
   const poster = c.poster_url ? ` poster="${esc(c.poster_url)}"` : "";
   const video = c.file_url ? `<video controls playsinline preload="metadata"${poster} src="${esc(c.file_url)}"></video>`
     : `<div class="na">Not exported${c.raw_url ? " (raw cut available below)" : ""}.<br>Scan with "Export" on to render it.</div>`;
@@ -334,7 +333,7 @@ function clipCard(c, rep) {
       <div class="meta"><span class="score">${c.score != null ? Number(c.score).toFixed(1) : "–"}</span>
         #${c.rank} · ${esc(c.start_ts)} → ${esc(c.end_ts)} · ${Number(c.duration).toFixed(1)}s${c.jump_cuts ? ` · ${c.jump_cuts} jump cut${c.jump_cuts > 1 ? "s" : ""}` : ""}
         ${yt ? `· <a href="${esc(yt)}" target="_blank" rel="noopener">open at ${fmtTs(c.start)}</a>` : ""}</div>
-      ${textHook ? `<div class="field"><span class="k">Text hook</span><span class="hint">on screen from the first frame (burned into the vertical clip)</span></div>` : ""}
+      ${c.text_hook ? `<div class="field"><span class="k">Text hook</span><span class="hint">judged with this on screen from the first frame · ${c.text_hook_burned ? "burned into the vertical clip" : "<b>not burned in: add it yourself</b>"}</span></div>` : ""}
       <div class="copyline"><span class="caption">${esc(c.caption_title)}</span>
         <button class="small" data-copy="${esc(c.caption_title)}">Copy</button></div>
       <div class="field"><span class="k">Hook</span><span>${esc(c.hook_line)}</span></div>

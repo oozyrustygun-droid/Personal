@@ -37,7 +37,8 @@ def _crit(score):
 
 
 def verdict(score=9.5, great=True):
-    return {"first_two_seconds": "Joe bites and screams", "gates": {g: _gate() for g in (
+    return {"text_hook": "He tried the spiciest chip alive", "first_two_seconds": "Joe bites and screams",
+            "gates": {g: _gate() for g in (
         "hook_in_first_2s", "standalone", "clear_payoff", "no_dead_air", "monetization_safe")},
             "scores": {c: _crit(score) for c in ("hook_strength", "payoff", "emotional_intensity", "shareability",
                                                  "comment_bait", "rewatch_loop", "joe_signature", "visual_strength")},
@@ -350,7 +351,7 @@ def test_full_judging_on_the_subscription(fake, tmp_path):
     assert seen[0]["billing"] == "subscription" and seen[0]["expected_calls"] >= 1
     assert res.status == "complete", res.notes
     assert [d.candidate_id for d in res.great] == ["c0", "c1"]
-    assert res.packaging["c0"]["caption_title"] == "Joe regrets this bite"
+    assert res.packaging["c0"]["caption_title"] == "He tried the spiciest chip alive"  # the judged text hook
     purposes = [json.loads(c["argv"][c["argv"].index("--json-schema") + 1])["properties"] for c in fake.calls()]
     assert sum("first_two_seconds" in p for p in purposes) == 6  # 3 judges x 2 clips, all the configured model
     assert tracker.summary()["total_usd"] == 0
@@ -550,3 +551,37 @@ def test_stale_cached_failures_from_older_builds_are_ignored(fake, tmp_path):
     [entry] = list((tmp_path / "llm" / "judge").glob("*.json"))
     entry.write_text(json.dumps({"error": {"kind": "schema", "message": "old"}, "usages": []}))
     assert call(llm).data["score"] == 7.0 and len(fake.calls()) == 2
+
+
+def test_one_judged_hook_is_the_posted_hook(fake, tmp_path):
+    """Text-hook mode: the first judge writes the hook; every later judge, the devil's advocate and the arbiter
+    are given exactly that hook, and packaging can't rewrite what gets burned in."""
+    from clip_scanner.judging.runner import run_judging
+
+    llm, _ = make_llm(fake, tmp_path)
+    assert llm.cfg.judging.text_hook
+    cands, ctx = judging_context(llm)
+    res = run_judging(cands[:1], ctx, max_clips=5)
+    assert res.great and res.packaging["c0"]["caption_title"] == "He tried the spiciest chip alive"
+    calls = fake.calls()
+    props = [list(json.loads(c["argv"][c["argv"].index("--json-schema") + 1])["properties"]) for c in calls]
+    texts = [" ".join(b.get("text", "") for b in c["message"]["message"]["content"]) for c in calls]
+    judge_texts = [t for p, t in zip(props, texts) if p[0] == "text_hook"]
+    assert len(judge_texts) == 3
+    assert "<on_screen_text_hook>" not in judge_texts[0]                       # judge 1 writes it
+    assert all("<on_screen_text_hook>He tried the spiciest chip alive</on_screen_text_hook>" in t
+               for t in judge_texts[1:])                                          # judges 2, 3 are given it
+    for role in ("strongest_flop_argument", "strongest_point_for", "hook_line"):  # devil, arbiter, packaging
+        t = next(t for p, t in zip(props, texts) if p[0] == role)
+        assert "<on_screen_text_hook>He tried the spiciest chip alive</on_screen_text_hook>" in t, role
+
+
+def test_strict_mode_has_no_hook_anywhere(fake, tmp_path):
+    from clip_scanner.judging.runner import run_judging
+
+    llm, _ = make_llm(fake, tmp_path)
+    llm.cfg.judging.text_hook = False
+    cands, ctx = judging_context(llm)
+    res = run_judging(cands[:1], ctx, max_clips=5)
+    assert res.great and res.packaging["c0"]["caption_title"] == "Joe regrets this bite"
+    assert not any("on_screen_text_hook" in json.dumps(c["message"]) for c in fake.calls())

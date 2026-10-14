@@ -66,17 +66,32 @@ def _meta(c: Candidate, ctx: JudgeContext, **extra) -> dict:
             "duration": c.duration, **extra}
 
 
-def _judge_once(c: Candidate, persona: str, packet: list[dict], ctx: JudgeContext) -> JudgeOutcome:
+def _judge_once(c: Candidate, persona: str, packet: list[dict], ctx: JudgeContext,
+                fixed_hook: str | None = None) -> JudgeOutcome:
+    """fixed_hook (text-hook mode): the on-screen hook an earlier judge wrote; this judge judges with it."""
     j = ctx.cfg.judging
     system = prompts.system_blocks(ctx.handbook, persona, j.cache_ttl)
+    content = packet + ([prompts.hook_block(fixed_hook, for_judge=True)] if fixed_hook is not None else [])
     try:
         res = ctx.llm.call(purpose="judge", model=j.model, system=system,
-                           messages=[{"role": "user", "content": packet}], output=JudgeVerdict, effort=j.effort,
+                           messages=[{"role": "user", "content": content}], output=JudgeVerdict, effort=j.effort,
                            max_tokens=j.max_output_tokens, meta=_meta(c, ctx, persona=persona))
-        return JudgeOutcome(persona=persona, verdict=res.data, served_model=res.served_model,
+        verdict = dict(res.data)
+        if fixed_hook is not None:
+            verdict["text_hook"] = fixed_hook  # the hook it was told to judge with is the one on record
+        return JudgeOutcome(persona=persona, verdict=verdict, served_model=res.served_model,
                             fallback=res.fallback_used)
     except LLMError as e:
         return JudgeOutcome(persona=persona, error=str(e))
+
+
+def posted_hook(outcomes_or_judges) -> str | None:
+    """The single on-screen text hook a clip is judged and posted with: the first judge's (text-hook mode)."""
+    for o in outcomes_or_judges:
+        v = o.verdict if isinstance(o, JudgeOutcome) else (o or {}).get("verdict")
+        if v:
+            return " ".join(str(v.get("text_hook", "")).split())
+    return None
 
 
 def _panel_summary(outcomes: list[JudgeOutcome]) -> str:
@@ -84,9 +99,8 @@ def _panel_summary(outcomes: list[JudgeOutcome]) -> str:
     parts = []
     for i, o in enumerate(outcomes, 1):
         v = o.verdict or {}
-        hook = f" Proposed on-screen text hook: \"{v['text_hook']}\"." if v.get("text_hook") else ""
         parts.append(f"Judge {i}: {v.get('overall_justification', '')} "
-                     f"(Their own biggest worry: {v.get('biggest_weakness', '')}){hook}")
+                     f"(Their own biggest worry: {v.get('biggest_weakness', '')})")
     return "\n".join(parts)
 
 
@@ -95,6 +109,9 @@ def _devil_and_arbiter(c: Candidate, packet: list[dict], outcomes: list[JudgeOut
     j = ctx.cfg.judging
     panel_case = _panel_summary(outcomes)
     stream = prompts.transcript_block(ctx.duration, ctx.transcript, ctx.cfg, j.cache_ttl)
+    hook = posted_hook(outcomes) if ctx.cfg.judging.text_hook else None
+    if hook is not None:
+        packet = packet + [prompts.hook_block(hook, for_judge=False)]
     try:
         res = ctx.llm.call(
             purpose="devils_advocate", model=j.model,
@@ -150,7 +167,17 @@ def judge_candidate(c: Candidate, det: list[GateResult], measurements: dict, ctx
     if any(not g.passed for g in det):
         return decide(c.id, det, None, None, None, cfg)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), cfg)
-    outcomes = collect_panel(cfg, lambda persona: _judge_once(c, persona, packet, ctx), full_panel=full_panel)
+    done: list[JudgeOutcome] = []
+
+    def judge(persona: str) -> JudgeOutcome:
+        # Text-hook mode: the first judge writes the clip's on-screen hook; every later judge, the devil's
+        # advocate, the arbiter and the export use exactly that hook, so the posted hook is the judged one.
+        fixed = posted_hook(done) if cfg.judging.text_hook else None
+        o = _judge_once(c, persona, packet, ctx, fixed_hook=fixed)
+        done.append(o)
+        return o
+
+    outcomes = collect_panel(cfg, judge, full_panel=full_panel)
     pre = decide(c.id, det, outcomes, None, None, cfg)
     panel_passed = pre.stage in ("devils_advocate", "great")  # decide() got no ruling yet
     # Only clips the whole panel passed face the devil's advocate. In calibration (full_panel) every
@@ -243,22 +270,31 @@ def package(c: Candidate, decision: Decision, ctx: JudgeContext) -> dict:
     measurements = clip_measurements(c, ctx.transcript, ctx.signals, ctx.cfg.gates.music_prob)
     packet = prompts.clip_packet(c, ctx.transcript, ctx.signals, measurements, ctx.frames.get(c.id, []), ctx.cfg)
     hooks = [jd.get("verdict", {}) or {} for jd in decision.judges]
-    notes = "\n".join(f"- text hook: {h.get('text_hook', '')} | opening: {h.get('hook_line', '')} | "
-                      f"{h.get('overall_justification', '')}" for h in hooks if h)
+    notes = "\n".join(f"- opening: {h.get('hook_line', '')} | {h.get('overall_justification', '')}"
+                      for h in hooks if h)
+    # Text-hook mode: the on-screen hook was fixed during judging and every judge, the devil's advocate and
+    # the arbiter judged the clip with it. It is posted verbatim, never rewritten here.
+    fixed = posted_hook(decision.judges) if j.text_hook else None
+    extra = []
+    if fixed is not None:
+        extra = [prompts.hook_block(fixed, for_judge=False),
+                 {"type": "text", "text": "That on-screen text hook is final: write the other fields to match it."}]
     try:
-        return ctx.llm.call(
+        data = ctx.llm.call(
             purpose="packaging", model=j.model,
             system=prompts.system_blocks(ctx.handbook, "packaging", j.cache_ttl),
-            messages=[{"role": "user", "content": packet + [
+            messages=[{"role": "user", "content": packet + extra + [
                 {"type": "text", "text": f"PANEL NOTES:\n{notes}\n\nWrite the packaging."}]}],
             output=Packaging, effort="medium", max_tokens=8000, meta=_meta(c, ctx, role="packaging"),
             allow_fallback=True).data
     except LLMError as e:
         first = (hooks[0] if hooks else {}) or {}
-        return {"hook_line": first.get("hook_line", ""), "why_viral": first.get("overall_justification", ""),
-                "caption_title": " ".join((first.get("text_hook") or first.get("hook_line", "")).split()[:8]),
-                "posting_hook_text": "",
+        data = {"hook_line": first.get("hook_line", ""), "why_viral": first.get("overall_justification", ""),
+                "caption_title": " ".join(first.get("hook_line", "").split()[:8]), "posting_hook_text": "",
                 "hashtags": ["#joebartolozzi"], "error": str(e)}
+    if fixed is not None:
+        data = {**data, "caption_title": fixed, "text_hook": fixed}
+    return data
 
 
 def diagnose(decisions: list[Decision], ctx: JudgeContext) -> str:

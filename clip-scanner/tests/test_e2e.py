@@ -117,7 +117,10 @@ def test_export_is_vertical_with_audio_and_tracks_face(first, env):
     dur = float(info["format"]["duration"])
     assert abs(dur - first["great_clips"][0]["duration"]) <= 0.45  # + pre-roll at most
     sidecar = json.loads(path.with_suffix(".json").read_text())
-    assert sidecar["text_hook"] == first["great_clips"][0]["caption_title"]  # the hook is burned in
+    top = first["great_clips"][0]
+    # The burned-in hook is the hook the first judge wrote and every later judge was given, not a rewrite.
+    assert top["text_hook"].startswith("Joe: ") and top["text_hook_burned"]
+    assert sidecar["text_hook"] == top["caption_title"] == top["text_hook"]
 
     raw = Path(first["great_clips"][0]["raw_file"])  # untouched landscape cut with handles, for editing
     rv = next(s for s in ffprobe(raw)["streams"] if s["codec_type"] == "video")

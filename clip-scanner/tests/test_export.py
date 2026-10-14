@@ -175,7 +175,7 @@ def test_text_hook_is_drawn_at_the_top_for_the_whole_clip():
 
     cfg = Config().captions
     ass = build_ass([TimedWord(0.1, 0.4, "wait")], cfg, 1080, 1920, 15.0, title="He lost his wallet 💀 {\\b1}")
-    hook = [l for l in ass.splitlines() if l.startswith("Dialogue: 1,") and ",Hook," in l]
+    hook = [ln for ln in ass.splitlines() if ln.startswith("Dialogue: 1,") and ",Hook," in ln]
     assert len(hook) == 1 and "0:00:00.00,0:00:15.00" in hook[0]
     assert "HE LOST HIS WALLET (\\B1)" in hook[0] or "HE LOST HIS WALLET (B1)" in hook[0]
     assert "💀" not in ass and "Style: Hook," in ass
@@ -193,3 +193,20 @@ def test_burned_hook_only_in_text_hook_mode():
     assert burned_hook(on, pkg, "c01") == "Joe's flight from hell"
     off = Config.model_validate({"judging": {"text_hook": True}, "captions": {"burn_text_hook": False}})
     assert burned_hook(off, pkg, "c01") == ""
+
+
+def test_text_hook_clip_is_never_exported_without_its_hook(monkeypatch):
+    from types import SimpleNamespace
+
+    from clip_scanner import export
+    from clip_scanner.media import MediaError
+
+    monkeypatch.setattr(export, "has_filter", lambda name: False)  # Homebrew's plain ffmpeg: no libass
+    monkeypatch.setattr(export, "probe", lambda p: SimpleNamespace(display_size=(1920, 1080)))
+    monkeypatch.setattr(export, "require_binary", lambda n: n)
+    a = SimpleNamespace(meta=SimpleNamespace(path="x.mp4"), transcript=SimpleNamespace(words=[]),
+                        ws=SimpleNamespace(root="."))
+    cand = SimpleNamespace(segments=[(10.0, 25.0)])
+    cfg = Config.model_validate({"judging": {"text_hook": True}, "export": {"crop_mode": "center"}})
+    with pytest.raises(MediaError, match="text hook"):
+        export.render_clip(a, cand, __import__("pathlib").Path("out.mp4"), cfg, title="He lost his wallet")

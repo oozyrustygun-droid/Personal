@@ -97,6 +97,8 @@ def _clip_json(rank, d, c, pkg, exported) -> dict:
         "poster": (exported.get(c.id) or {}).get("poster"),
         "raw_clip_in_out": [(exported.get(c.id) or {}).get("raw_in"), (exported.get(c.id) or {}).get("raw_out")],
         "captions_burned": (exported.get(c.id) or {}).get("captions"),
+        "text_hook": pkg.get("text_hook", ""),  # text-hook mode: the hook every judge judged the clip with
+        "text_hook_burned": bool((exported.get(c.id) or {}).get("text_hook_burned")),
     }
 
 
@@ -168,8 +170,9 @@ def render_markdown(rep: dict, explain_rejects: bool) -> str:
               "",
               f"- **Hook:** {c['hook_line']}",
               f"- **Why it will go viral:** {c['why_viral']}",
-              (f"- **On-screen text hook (burned in at the top of the vertical clip; the judges judged the "
-               f"opening with it):** {c['caption_title']}" if rep["bar"].get("text_hook")
+              (f"- **On-screen text hook (the judges judged the opening with it; "
+               f"{'burned in at the top of the vertical clip' if c.get('text_hook_burned') else 'NOT burned in: add it yourself'}"
+               f"):** {c['caption_title']}" if c.get("text_hook")
                else f"- **On-screen caption / title:** {c['caption_title']}"),
               f"- **Posting hook text:** {c['posting_hook_text']}",
               f"- **Hashtags:** {' '.join(c['hashtags'])}",
