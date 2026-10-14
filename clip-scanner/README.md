@@ -70,6 +70,9 @@ has the pyannote models accepted. Set `[diarization] enabled = true`.
 
 ## Web UI (easiest)
 
+Double-click **Open Clip Scanner.command** in this folder (Finder). It pulls the latest version and opens
+the scanner in your browser. Or, in Terminal:
+
 ```bash
 uv run clip-scanner ui
 ```
