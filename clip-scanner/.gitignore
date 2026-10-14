@@ -13,3 +13,5 @@ calibration/clips/**/*.mkv
 calibration/clips/**/*.m4a
 calibration/clips/**/*.part
 calibration/results/
+# personal settings (see README: Settings)
+config.local.toml

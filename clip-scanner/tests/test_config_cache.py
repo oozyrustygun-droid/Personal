@@ -74,3 +74,12 @@ def test_missing_explicit_config_is_an_error(tmp_path, monkeypatch):
     monkeypatch.setenv("CLIP_SCANNER_CONFIG", str(tmp_path / "also-nope.toml"))
     with pytest.raises(FileNotFoundError):
         load_config()
+
+
+def test_local_overrides_merge_over_config(tmp_path):
+    from clip_scanner.config import load_config
+
+    (tmp_path / "config.toml").write_text('[judging]\neffort = "high"\noverall_min = 8.5\n')
+    (tmp_path / "config.local.toml").write_text('[judging]\neffort = "medium"\n')
+    cfg = load_config(str(tmp_path / "config.toml"))
+    assert cfg.judging.effort == "medium" and cfg.judging.overall_min == 8.5

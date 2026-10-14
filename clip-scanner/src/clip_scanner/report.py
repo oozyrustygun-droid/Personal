@@ -8,7 +8,7 @@ from pathlib import Path
 from rich.panel import Panel
 from rich.table import Table
 
-from . import __version__
+from . import build_id
 from .cache import write_json
 from .config import Config
 from .judging.panel import near_miss_key
@@ -116,7 +116,7 @@ def build_report(a, result, cfg: Config, exported: dict | None = None, scripted:
     near = sorted([d for d in rejected if d.stage != "error"], key=near_miss_key)[:3]
     j = cfg.judging
     return {
-        "tool": f"clip-scanner {__version__}",
+        "tool": f"clip-scanner {build_id()}",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "video": {"id": a.meta.video_id, "title": a.meta.title, "source": a.meta.source, "url": a.meta.url,
                   "uploader": a.meta.uploader, "duration": round(a.meta.duration, 1)},

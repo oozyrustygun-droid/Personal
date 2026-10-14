@@ -388,7 +388,7 @@ async function openReport(dir) {
       ? `Ran on your Claude plan through Claude Code: <b>$0 in API charges</b> (same tokens at API prices: ${usd(c.api_equivalent_usd || 0)})${c.extra_usage_used ? ' · <span class="err">Claude Code reported paid extra usage during this run</span>' : ""}`
       : c.billing === "none" ? "Scripted test judge: nothing spent"
       : `API cost of the last run: <b>${usd(c.total_usd)}</b> (cached calls are free)`;
-    html += `<p class="hint">${line}${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}</p>`;
+    html += `<p class="hint">${line}${rep.md_url ? ` · <a href="${esc(rep.md_url)}" target="_blank">report.md</a>` : ""}${rep.tool ? ` · ${esc(rep.tool)}` : ""}</p>`;
   }
   $("results").innerHTML = html;
   $("results-wrap").hidden = false;

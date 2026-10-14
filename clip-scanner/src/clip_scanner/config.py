@@ -329,6 +329,12 @@ def load_config(explicit: str | None = None, overrides: dict | None = None) -> C
     if path is not None:
         with open(path, "rb") as f:
             data = tomllib.load(f)
+        # Personal settings live in config.local.toml next to it (not tracked by git), so updating
+        # the scanner with `git pull` never conflicts with them.
+        local = path.with_name("config.local.toml")
+        if local.is_file():
+            with open(local, "rb") as f:
+                data = deep_merge(data, tomllib.load(f))
     if overrides:
         data = deep_merge(data, overrides)
     if "pricing" in data:

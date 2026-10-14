@@ -47,7 +47,9 @@ def _check_claude_code(cfg) -> bool:
 
 
 def run_doctor(argv: list[str]) -> int:
-    console.print("[bold]clip-scanner doctor[/bold]")
+    from . import build_id
+
+    console.print(f"[bold]clip-scanner doctor[/bold] [dim]{build_id()}[/dim]")
     good = True
     good &= _ok(sys.version_info[:2] == (3, 12), "Python 3.12", platform.python_version())
     ff = shutil.which("ffmpeg")

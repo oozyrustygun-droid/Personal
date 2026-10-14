@@ -159,6 +159,14 @@ actually be posted.
 
 All in `config.toml`, no code changes needed:
 
+Put your own changes in **`config.local.toml`** (create it next to `config.toml`), not in `config.toml`
+itself. It only needs the settings you change, and updates never touch it. For example:
+
+```toml
+[judging]
+effort = "medium"          # lighter on your plan's usage
+```
+
 | Knob | Default | Effect |
 |---|---|---|
 | `[judging] overall_min` | 8.5 | every judge's overall must reach this |
