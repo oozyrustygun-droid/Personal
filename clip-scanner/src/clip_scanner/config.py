@@ -69,7 +69,7 @@ class TopCfg(_Section):
     max_len_s: float = Field(180.0, gt=0)
     lead_s: float = Field(35.0, ge=0)         # build-up kept before the moment
     tail_s: float = Field(25.0, ge=0)         # aftermath kept after it
-    min_gap_s: float = Field(20.0, ge=0)      # space between two moments
+    min_gap_s: float = Field(20.0, ge=0)      # a later moment's peak is at least this far outside earlier clips
     candidates: int = Field(8, ge=1, le=20)   # regions Claude compares to pick the best `count`
     skip_intro_s: float = Field(45.0, ge=0)   # "most replayed" spikes here are mostly people pressing play
     use_claude: bool = True                   # rank with one Claude call (else by measured signals only)

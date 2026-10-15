@@ -124,14 +124,20 @@ def test_cancel_at_approval(server):
 
 
 def test_top_mode_scan(server):
-    """The default mode: no approval step, the best moments as raw landscape clips, served to the page."""
+    """The default mode: the best moments as raw landscape clips, served to the page. The test judge follows the
+    API rule, so with a $0 limit the one ranking call is approved first (on the subscription it just runs)."""
     base, token = server["base"], server["token"]
     status, _, body = req(base, "/api/jobs", "POST", {"text": str(FIX), "cut": True}, token=token)  # config default
     assert status == 200
     job = json.loads(body)["jobs"][0]
     assert job["mode"] == "top"
     assert [s["name"] for s in job["stages"]] == ["Ingest", "Transcribe", "Signals", "Moments", "Ranking", "Export"]
-    job = wait_for(base, lambda j: j["id"] == job["id"] and j["status"] in ("done", "failed", "awaiting_approval"))
+    job_id = job["id"]
+    job = wait_for(base, lambda j: j["id"] == job_id and j["status"] in ("done", "failed", "awaiting_approval"))
+    assert job["status"] == "awaiting_approval", job.get("error") or job["log"][-15:]
+    assert job["estimate"]["uncached"] == 1 and job["estimate"]["expected_calls"] == 1
+    assert req(base, f"/api/jobs/{job_id}/approve", "POST", token=token)[0] == 200
+    job = wait_for(base, lambda j: j["id"] == job_id and j["status"] in ("done", "failed"))
     assert job["status"] == "done", job.get("error") or job["log"][-15:]
     assert job["report_dir"].endswith("-top-SCRIPTED-TEST") and job["result_status"] == "complete"
     assert all(s["state"] in ("done", "cached") for s in job["stages"]), job["stages"]
@@ -144,6 +150,32 @@ def test_top_mode_scan(server):
     assert status == 206 and len(data) == 100
     page = req(base, "/")[2]
     assert b'DEFAULT_MODE = "top"' in page
+
+    # Re-scan: the ranking is cached and free, so it runs straight through.
+    job_id = json.loads(req(base, "/api/jobs", "POST", {"text": str(FIX)}, token=token)[2])["jobs"][0]["id"]
+    job = wait_for(base, lambda j: j["id"] == job_id and j["status"] in ("done", "failed", "awaiting_approval"))
+    assert job["status"] == "done" and job["result_status"] == "complete", job["log"][-10:]
+
+
+def test_top_mode_cancel_exports_nothing(server):
+    """Cancel at the approval card really cancels: no ranking, no clips, the earlier results untouched."""
+    import subprocess
+
+    base, token = server["base"], server["token"]
+    other = server["tmp"] / "other-top.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(FIX), "-t", "38", "-c", "copy", str(other)], check=True)
+    job_id = json.loads(req(base, "/api/jobs", "POST", {"text": str(other), "mode": "top"},
+                            token=token)[2])["jobs"][0]["id"]
+    job = wait_for(base, lambda j: j["id"] == job_id and j["status"] in ("awaiting_approval", "done", "failed"))
+    assert job["status"] == "awaiting_approval", job["log"][-10:]
+    assert req(base, f"/api/jobs/{job_id}/cancel", "POST", token=token)[0] == 200
+    job = wait_for(base, lambda j: j["id"] == job_id and j["finished"])
+    assert job["status"] == "cancelled" and job["result_status"] == "unavailable"
+    assert job["stages"][-1]["state"] == "pending"  # never exported
+    out = server["tmp"] / "out" / job["report_dir"]
+    assert not list(out.glob("clips/*.mp4"))
+    rep = json.loads((out / "report.json").read_text())
+    assert rep["status"] == "unavailable" and not rep["moments"]
 
 
 def test_friendly_errors():

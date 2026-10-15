@@ -34,6 +34,7 @@ CORE_FRAC = 0.6        # a region's core: the seconds around its peak scoring at
 FLAG_SIGMA_S = 12.0    # how far a transcript flag's bump reaches
 SNAP_S = 6.0           # how far a clip edge may move to land on a sentence edge
 ADJUST_S = 30.0        # how far Claude may move a region's edges
+SHOULDER_DIP = 0.8     # a peak next to a picked hill is its own moment only if the score dips below this between
 
 
 @dataclass
@@ -67,9 +68,8 @@ def load_heatmap(ws: Workspace) -> list[dict]:
     return [s for s in segs if isinstance(s, dict)]
 
 
-def heat_series(segments: list[dict], duration: float) -> np.ndarray | None:
-    """YouTube's replay graph resampled to one value per second (0..1), or None if it is missing or partial."""
-    n = max(1, int(math.ceil(duration)))
+def _heat_points(segments: list[dict]) -> list[tuple[float, float, float]]:
+    """(centre, width, value) of each valid replay-graph segment, in time order."""
     pts = []
     for s in segments:
         try:
@@ -78,6 +78,27 @@ def heat_series(segments: list[dict], duration: float) -> np.ndarray | None:
             continue
         if math.isfinite(a) and math.isfinite(b) and math.isfinite(v) and b > a:
             pts.append(((a + b) / 2, b - a, max(0.0, v)))
+    return sorted(pts)
+
+
+def edge_windows(segments: list[dict], duration: float, cfg: Config) -> tuple[float, float]:
+    """(head_s, tail_s): the stretches at the start (people pressing play, skipping the intro) and at the end
+    (the end card) that are weighed down. Scaled to short videos; on long ones the head also covers the replay
+    graph's first segment, which YouTube makes duration/100 wide, so a play-press spike can't outlast it."""
+    head = min(cfg.top.skip_intro_s, 0.1 * duration)
+    pts = _heat_points(segments)
+    if pts:
+        head = max(head, 1.5 * pts[0][1])
+    return min(head, 0.25 * duration), min(15.0, 0.05 * duration)
+
+
+def heat_series(segments: list[dict], duration: float, head_s: float = 0.0,
+                tail_s: float = 0.0) -> np.ndarray | None:
+    """YouTube's replay graph resampled to one value per second, or None if it is missing or partial.
+    1.0 is the most replayed second outside the first head_s and last tail_s seconds; a play-press or end-card
+    spike there is capped at 1.0 instead of setting the scale for the whole video."""
+    n = max(1, int(math.ceil(duration)))
+    pts = _heat_points(segments)
     if len(pts) < 10:
         return None
     pts.sort()
@@ -88,7 +109,10 @@ def heat_series(segments: list[dict], duration: float) -> np.ndarray | None:
     if top <= 0:
         return None
     t = np.arange(n) + 0.5
-    return np.interp(t, [p[0] for p in pts], [p[2] / top for p in pts]).astype(np.float64)
+    vals = np.interp(t, [p[0] for p in pts], [p[2] / top for p in pts]).astype(np.float64)
+    body = vals[int(head_s): max(int(head_s), n - int(tail_s))]
+    scale = float(body.max()) if body.size and body.max() > 0 else 1.0
+    return np.clip(vals / scale, 0.0, 1.0)
 
 
 def _moving_mean(x: np.ndarray, width: int) -> np.ndarray:
@@ -99,15 +123,17 @@ def _moving_mean(x: np.ndarray, width: int) -> np.ndarray:
     return np.convolve(np.pad(x.astype(np.float64), (pad, width - 1 - pad), mode="edge"), k, mode="valid")
 
 
-def score_curve(sig: Signals, duration: float, heat: np.ndarray | None, proposals: list,
-                cfg: Config) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Combined per-second score (0..1) and its parts."""
+def score_curve(sig: Signals, duration: float, heat: np.ndarray | None, proposals: list, cfg: Config,
+                head_s: float | None = None, tail_s: float | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Combined per-second score (0..1) and its parts. head_s / tail_s: see edge_windows."""
     n = max(1, int(math.ceil(duration)))
     interest = sig.per_second("interest", "mean")[:n]
     interest = np.pad(interest, (0, n - len(interest))) if len(interest) < n else interest
     smooth = _moving_mean(interest, 7)
     ref = float(np.percentile(smooth, 99)) if smooth.size else 0.0
     react = np.clip(smooth / ref, 0, 1) if ref > 1e-9 else np.zeros(n)
+    if ref > 1e-9:  # the top 1 % saturate at 1.0: keep them ordered by strength, not by time
+        react = (1 - 1e-3) * react + 1e-3 * smooth / float(smooth.max())
     flags = np.zeros(n)
     t = np.arange(n) + 0.5
     for m in proposals:
@@ -126,13 +152,24 @@ def score_curve(sig: Signals, duration: float, heat: np.ndarray | None, proposal
         score = 0.65 * react + 0.35 * flags
     # The replay graph spikes at the start (people pressing play, skipping the intro) and the end card
     # never makes a clip: weigh both down without ruling them out.
-    intro = min(n, int(cfg.top.skip_intro_s))
-    if intro > 0 and duration > 4 * cfg.top.max_len_s:
+    if head_s is None or tail_s is None:
+        head_s, tail_s = edge_windows([], duration, cfg)
+    intro = min(n, int(head_s))
+    if intro > 0:
         score[:intro] *= np.linspace(0.3, 1.0, intro)
-    outro = min(n, 15)
-    if duration > 4 * cfg.top.max_len_s:
+    outro = min(n, int(tail_s))
+    if outro > 0:
         score[n - outro:] *= 0.5
     return score, parts
+
+
+def curve(segments: list[dict], sig: Signals, duration: float, proposals: list,
+          cfg: Config) -> tuple[np.ndarray, dict[str, np.ndarray], np.ndarray | None]:
+    """(score, parts, heat) for a video: the replay graph (if any) and the signals on one scale."""
+    head, tail = edge_windows(segments, duration, cfg)
+    heat = heat_series(segments, duration, head, tail)
+    score, parts = score_curve(sig, duration, heat, proposals, cfg, head, tail)
+    return score, parts, heat
 
 
 # ---- clip edges -------------------------------------------------------------------------------------
@@ -184,24 +221,42 @@ def fit_length(s: float, e: float, focus: float, lo: float, hi: float, cfg: Conf
     return s, e
 
 
+def _shoulder(score: np.ndarray, taken: np.ndarray, p: int, a: int, b: int) -> bool:
+    """The core a..b around peak p runs into an earlier pick's hill, still rising toward it with no real dip
+    in between: it is that hill's slope, not a moment of its own."""
+    v = float(score[p])
+    if a > 0 and taken[a - 1] and score[a - 1] > v and float(score[a: p + 1].min()) >= SHOULDER_DIP * v:
+        return True
+    return bool(b < len(score) - 1 and taken[b + 1] and score[b + 1] > v
+                and float(score[p: b + 1].min()) >= SHOULDER_DIP * v)
+
+
 def find_regions(score: np.ndarray, parts: dict[str, np.ndarray], heat: np.ndarray | None, duration: float,
-                 transcript: Transcript, proposals: list, cfg: Config, limit: int) -> list[Region]:
-    """The best-scoring non-overlapping clip windows, best first."""
+                 transcript: Transcript, proposals: list, cfg: Config, limit: int, need: int = 0) -> list[Region]:
+    """The best-scoring non-overlapping clip windows, best first. A first pass keeps only distinct moments with
+    room for a full-length clip; if that yields fewer than `need`, slopes of a picked hill and clips squeezed
+    between picks (down to half of min_len_s) are allowed too."""
     tc = cfg.top
     sentences = split_sentences(transcript.words, cfg.candidates.pause_break_s)
     if duration <= tc.min_len_s:
         s, e = 0.0, duration
         peak = int(np.argmax(score)) if score.size else 0
-        return [_describe(Region(s, e, float(peak) + 0.5, float(score[peak]) if score.size else 0.0, s, e),
-                          parts, heat, proposals)]
+        return [_describe(Region(s, e, min(float(peak) + 0.5, duration), float(score[peak]) if score.size else 0.0,
+                                 s, e), parts, heat, proposals)]
     n = len(score)
-    masked = np.zeros(n, dtype=bool)
+    taken_mask = np.zeros(n, dtype=bool)   # picked clips plus min_gap_s around them
+    skipped = np.zeros(n, dtype=bool)      # peaks passed over in this pass
     taken: list[tuple[float, float]] = []
     out: list[Region] = []
+    strict = True
     while len(out) < limit:
+        masked = taken_mask | skipped
         avail = np.where(masked, -np.inf, score)
         p = int(np.argmax(avail))
         if not np.isfinite(avail[p]):
+            if strict and len(out) < need:
+                strict, skipped[:] = False, False  # too few distinct moments: take the near-misses too
+                continue
             break
         v = float(score[p])
         a = b = p
@@ -209,17 +264,21 @@ def find_regions(score: np.ndarray, parts: dict[str, np.ndarray], heat: np.ndarr
             a -= 1
         while b < n - 1 and not masked[b + 1] and score[b + 1] >= CORE_FRAC * v and b - p < tc.max_len_s / 2:
             b += 1
+        if strict and _shoulder(score, taken_mask, p, a, b):
+            skipped[a: b + 1] = True
+            continue
         free_lo = max([e for _, e in taken if e <= p] + [0.0])
         free_hi = min([s for s, _ in taken if s >= p + 1] + [duration])
-        focus = p + 0.5
+        focus = min(p + 0.5, duration)
         s, e = fit_length(a - tc.lead_s, b + 1 + tc.tail_s, focus, free_lo, free_hi, cfg)
         s, e = snap_edges(s, e, free_lo, free_hi, transcript.words, sentences, tc.max_len_s)
-        if e - s < 0.5 * tc.min_len_s or not s <= focus <= e:
-            masked[a: b + 1] = True  # squeezed between earlier picks: not a clip of its own
+        shortest = (0.9 if strict else 0.5) * min(tc.min_len_s, duration)
+        if e - s < shortest or not s <= focus <= e:
+            skipped[a: b + 1] = True  # squeezed between earlier picks: no room for a clip of its own
             continue
         taken.append((s, e))
         lo_mask = max(0, int(s - tc.min_gap_s))
-        masked[lo_mask: min(n, int(math.ceil(e + tc.min_gap_s)))] = True
+        taken_mask[lo_mask: min(n, int(math.ceil(e + tc.min_gap_s)))] = True
         out.append(_describe(Region(s, e, focus, v, s, e), parts, heat, proposals))
     # How far Claude may move each edge: ADJUST_S, never into another region.
     for r in out:
@@ -267,8 +326,9 @@ WHICH moments; the editor does the rest.
 
 You get candidate regions found by measurement:
 - YouTube's "Most replayed" graph, when the video has one: where real viewers rewound and rewatched. It is \
-the strongest evidence of what people found worth watching again. 1.00 is the most replayed second of the \
-whole video.
+the strongest evidence of what people found worth watching again. 1.00 is the most replayed part of the \
+video outside its first and last moments (a spike there, from people pressing play or skipping to the end, \
+is capped at 1.00).
 - Audio reactions (laughter, screams, loudness spikes) and transcript flags.
 - The transcript of each region (speech-to-text: it can mishear names and words).
 
@@ -313,6 +373,19 @@ def ranking_message(regions: list[Region], transcript: Transcript, title: str, d
     return "\n".join(parts)
 
 
+def ranking_request(regions: list[Region], transcript: Transcript, title: str, duration: float, cfg: Config,
+                    has_heat: bool, count: int) -> dict:
+    """The one ranking call's arguments for LLM.call (also used to tell whether it is already cached)."""
+    system = [{"type": "text", "text": RANK_SYSTEM.replace("{count}", str(min(count, len(regions))))
+               + load_style_guide(), "cache_control": {"type": "ephemeral"}}]
+    msg = ranking_message(regions, transcript, title, duration, cfg, has_heat, count)
+    meta = {"regions": [[r.start, r.end, r.peak] for r in regions], "count": count,
+            "texts": [transcript.text_between(r.start, r.end) for r in regions]}
+    return {"purpose": "top_rank", "model": cfg.judging.model, "system": system,
+            "messages": [{"role": "user", "content": msg}], "output": TopRanking, "effort": cfg.top.effort,
+            "meta": meta}
+
+
 @dataclass
 class Moment:
     rank: int
@@ -338,6 +411,8 @@ class TopResult:
     notes: list[str] = field(default_factory=list)
     served_model: str = ""
     recall_incomplete: bool = False  # the transcript proposer missed part of the video (no replay data)
+    cancelled: bool = False          # the ranking didn't run and nothing was exported
+    error: str = ""                  # why Claude couldn't rank (method "signals" after a failed call)
 
 
 def _fallback_title(r: Region) -> str:
@@ -406,24 +481,22 @@ def rank(llm: LLM | None, regions: list[Region], transcript: Transcript, title: 
         notes.append("This video has no YouTube \"Most replayed\" data (too new, too few views, or not a YouTube "
                      "link), so the moments were found from the audio, the transcript and Claude's read only.")
     if llm is not None and cfg.top.use_claude and regions:
-        system = [{"type": "text", "text": RANK_SYSTEM.replace("{count}", str(min(count, len(regions))))
-                   + load_style_guide(), "cache_control": {"type": "ephemeral"}}]
-        msg = ranking_message(regions, transcript, title, duration, cfg, has_heat, count)
-        meta = {"regions": [[r.start, r.end, r.peak] for r in regions], "count": count,
-                "texts": [transcript.text_between(r.start, r.end) for r in regions]}
         try:
-            res = llm.call(purpose="top_rank", model=cfg.judging.model, system=system,
-                           messages=[{"role": "user", "content": msg}], output=TopRanking, effort=cfg.top.effort,
-                           max_tokens=8000, meta=meta)
+            res = llm.call(**ranking_request(regions, transcript, title, duration, cfg, has_heat, count),
+                           max_tokens=8000)
             moments = apply_picks(res.data["picks"], regions, transcript, cfg, count)
             if res.fallback_used:
                 notes.append(f"Claude Code answered with {res.served_model} instead of {cfg.judging.model} "
                              f"for the ranking.")
             return TopResult(moments, regions, "claude", has_heat, notes, res.served_model)
         except LLMError as e:
-            notes.append(f"Claude couldn't rank the moments ({e}); they are in measured order instead.")
+            error = str(e)
             if console:
-                console.print(f"  [yellow]{notes[-1]}[/yellow]")
+                console.print(f"  [yellow]Claude couldn't rank the moments ({error}).[/yellow]")
+            moments = [Moment(k + 1, r.start, r.end, r.peak, _fallback_title(r), _fallback_why(r), "", r)
+                       for k, r in enumerate(regions[:count])]
+            notes.append(f"Claude couldn't rank the moments ({error}); they are in measured order instead.")
+            return TopResult(moments, regions, "signals", has_heat, notes, error=error)
     moments = [Moment(k + 1, r.start, r.end, r.peak, _fallback_title(r), _fallback_why(r), "", r)
                for k, r in enumerate(regions[:count])]
     return TopResult(moments, regions, "signals", has_heat, notes)

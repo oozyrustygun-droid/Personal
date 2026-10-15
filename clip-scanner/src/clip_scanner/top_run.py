@@ -11,8 +11,8 @@ from .candidates import cached_proposals, candidates_stage
 from .cli_common import BACKEND_LABEL, resolve_backend
 from .config import Config
 from .cost import CostTracker, estimate_tokens
-from .export import (_render_cached, make_poster, prune_stale_clips, render_span, restore_exports, slug,
-                     stash_exports)
+from .export import (STASH, _is_in_progress, _render_cached, make_poster, prune_stale_clips, render_span,
+                     restore_all, restore_exports, slug, stash_exports)
 from .ui import console, emit, fmt_ts, stage
 
 MOMENTS_DIR = "clips"
@@ -28,15 +28,25 @@ def moment_fingerprint(video_id: str, m: T.Moment, cfg: Config) -> str:
                        cfg.section_hash("export"))
 
 
-def ranking_estimate(cfg: Config, regions: list[T.Region], transcript, llm) -> dict:
-    """Size of the one ranking call, in the shape the approval flow uses."""
+def ranking_estimate(cfg: Config, request: dict, regions: list[T.Region], llm) -> dict:
+    """Size of the one ranking call, in the shape the approval flow uses (nothing to pay if it is cached)."""
     price = cfg.price(cfg.judging.model)
-    text = " ".join(transcript.text_between(r.start, r.end) for r in regions)
-    tokens_in = estimate_tokens(text) * 1.4 + 4500  # timestamps, instructions, style guide
-    usd = (tokens_in * price.input + 2500 * price.output) / 1e6
-    return {"candidates": len(regions), "eligible": len(regions), "uncached": 1 if regions else 0,
+    text = request["system"][0]["text"] + request["messages"][0]["content"]
+    usd = (estimate_tokens(text) * price.input + 2500 * price.output) / 1e6
+    if llm.is_cached(**request):
+        usd = 0.0
+    return {"candidates": len(regions), "eligible": len(regions), "uncached": int(usd > 0),
             "model": cfg.judging.model, "effort": cfg.top.effort, "expected_usd": round(usd, 4),
             "worst_case_usd": round(usd * 2, 4), "billing": llm.billing, "expected_calls": 1, "worst_case_calls": 1}
+
+
+def previous_was_ranked(out_dir: Path) -> bool:
+    """The finished result this scan set aside (export.stash_exports) was ranked by Claude."""
+    try:
+        rep = read_json(out_dir / STASH / "report.json")
+    except (OSError, ValueError):
+        return False
+    return rep.get("mode") == "top" and (rep.get("ranking") or {}).get("method") == "claude"
 
 
 def run_top(args: argparse.Namespace, cfg: Config, confirm) -> dict:
@@ -63,8 +73,9 @@ def run_top(args: argparse.Namespace, cfg: Config, confirm) -> dict:
     recall_incomplete = False
 
     with stage("Moments") as st:
-        heat = T.heat_series(T.load_heatmap(ws), meta.duration)
-        if heat is None and cfg.candidates.llm_proposer:
+        segments = T.load_heatmap(ws)
+        has_heat = T.heat_series(segments, meta.duration) is not None
+        if not has_heat and cfg.top.use_claude and cfg.candidates.llm_proposer:
             # No audience data: the transcript proposer is the best stand-in for it (cached after the first
             # run; a run that missed part of the transcript is finished here).
             console.print(f"  [dim]no \"Most replayed\" data: Claude reads the transcript for moments "
@@ -77,9 +88,9 @@ def run_top(args: argparse.Namespace, cfg: Config, confirm) -> dict:
                              "missed; re-run to finish it (the rest is cached).")
         # With audience data, a transcript read from an earlier scan is reused (free) but not started.
         proposals = cached_proposals(ws, s_fp, cfg, llm) or []
-        score, parts = T.score_curve(sig, meta.duration, heat, proposals, cfg)
+        score, parts, heat = T.curve(segments, sig, meta.duration, proposals, cfg)
         regions = T.find_regions(score, parts, heat, meta.duration, transcript, proposals, cfg,
-                                 limit=max(cfg.top.candidates, count))
+                                 limit=max(cfg.top.candidates, count), need=count)
         st["note"] = (f"{len(regions)} candidate region(s) · \"Most replayed\" "
                       f"{'used' if heat is not None else 'not available'}"
                       + (f" · {len(proposals)} transcript flag(s)" if proposals else ""))
@@ -92,22 +103,43 @@ def run_top(args: argparse.Namespace, cfg: Config, confirm) -> dict:
 
     with stage("Ranking") as st:
         use_claude = cfg.top.use_claude and bool(regions)
-        if use_claude and llm.billing == "api":
-            est = ranking_estimate(cfg, regions, transcript, llm)
+        declined = False
+        if use_claude and llm.billing != "subscription":
+            # Paid API (or the offline test judge, which follows the API rule): spend over the limit is approved
+            # first, exactly as in great mode. A cached ranking costs nothing and is never asked about.
+            est = ranking_estimate(cfg, T.ranking_request(regions, transcript, meta.title, meta.duration, cfg,
+                                                          has_heat, count), regions, llm)
             emit("estimate", **est, threshold=cfg.judging.confirm_above_usd)
-            console.print(f"  ranking with {cfg.judging.model} on the API: ~${est['expected_usd']:.2f}")
-            if not confirm(est, cfg):
-                use_claude = False
-                notes.append("Ranking by Claude was skipped (not approved): moments are in measured order.")
-        if use_claude:
+            if est["uncached"]:
+                console.print(f"  ranking with {cfg.judging.model}: ~${est['expected_usd']:.2f} at API prices")
+            declined = not confirm(est, cfg)
+        if use_claude and not declined:
             console.print(f"  [dim]ranking on {BACKEND_LABEL.get(backend, backend)}[/dim]")
-        result = T.rank(llm if use_claude else None, regions, transcript, meta.title, meta.duration, cfg,
-                        heat is not None, count, console=console)
+        result = T.rank(llm if use_claude and not declined else None, regions, transcript, meta.title,
+                        meta.duration, cfg, has_heat, count, console=console)
         result.notes = notes + result.notes
         result.recall_incomplete = recall_incomplete
         picker = ("the scripted test ranking" if scripted else "Claude") if result.method == "claude" \
             else "measured signals"
-        st["note"] = f"{len(result.moments)} moment(s), picked by {picker}"
+        st["note"] = ("cancelled: not approved" if declined
+                      else f"{len(result.moments)} moment(s), picked by {picker}")
+
+    # Claude was meant to rank but didn't. Never replace a finished Claude-ranked result for this video with
+    # a weaker one: put it back. A declined approval means cancel: nothing is ranked or exported.
+    failed = use_claude and not declined and result.method != "claude"
+    if declined or (failed and previous_was_ranked(out_dir)):
+        why = ("Ranking wasn't approved, so nothing was ranked or exported." if declined
+               else f"Claude couldn't rank the moments this time ({result.error}). Your earlier results for this "
+                    f"video were kept; re-run later to refresh them.")
+        result.notes = [n for n in result.notes if not n.startswith("Claude couldn't rank")]
+        if restore_all(out_dir) and not _is_in_progress(out_dir / "report.json"):
+            console.print(f"[yellow]{why} The previous report and clips were left in place.[/yellow]")
+        else:
+            result.moments, result.cancelled = [], True
+            result.notes = [*result.notes, why]
+            write_top_reports(meta, transcript, sig, result, cfg, out_dir, {}, tracker, llm, scripted)
+            console.print(f"[yellow]{why}[/yellow]")
+        return {"code": 3, "out_dir": out_dir, "status": "unavailable", "notes": [*notes, why]}
 
     keep = {str(moment_path(out_dir, m)): moment_fingerprint(meta.video_id, m, cfg) for m in result.moments}
     restore_exports(out_dir, keep)

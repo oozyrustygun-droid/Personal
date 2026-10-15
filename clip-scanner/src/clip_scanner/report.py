@@ -296,7 +296,8 @@ def _moment_json(m, exported: dict, url: str | None) -> dict:
 def build_top_report(meta, transcript, sig, result, cfg: Config, exported: dict, tracker, llm,
                      scripted: bool = False) -> dict:
     n = len(result.moments)
-    base = f"TOP {n} MOMENT{'S' if n != 1 else ''}" if n else "NO MOMENTS FOUND"
+    base = (f"TOP {n} MOMENT{'S' if n != 1 else ''}" if n else
+            "RANKING DID NOT RUN (nothing exported)" if result.cancelled else "NO MOMENTS FOUND")
     partial = result.method != "claude" and cfg.top.use_claude
     return {
         "tool": f"clip-scanner {build_id()}",
@@ -305,7 +306,8 @@ def build_top_report(meta, transcript, sig, result, cfg: Config, exported: dict,
         "video": {"id": meta.video_id, "title": meta.title, "source": meta.source, "url": meta.url,
                   "uploader": meta.uploader, "duration": round(meta.duration, 1)},
         "verdict": f"[{SCRIPTED_BANNER}] {base}" if scripted else base,
-        "status": "partial" if partial or result.recall_incomplete else "complete",
+        "status": ("unavailable" if result.cancelled else
+                   "partial" if partial or result.recall_incomplete else "complete"),
         "judge_backend": "scripted" if scripted else llm.backend,
         "ranking": {"method": result.method, "model": cfg.judging.model if result.method == "claude" else None,
                     "served_model": result.served_model or None, "most_replayed": result.has_heat,

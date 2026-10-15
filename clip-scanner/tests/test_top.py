@@ -64,13 +64,14 @@ def cfg_with(**top) -> Config:
     return Config.model_validate({"top": top})
 
 
-def pick(duration=1200.0, bumps=None, peaks=None, proposals=(), limit=8, cfg=None, transcript=None):
+def pick(duration=1200.0, bumps=None, peaks=None, proposals=(), limit=8, cfg=None, transcript=None, need=0,
+         segments=None):
     cfg = cfg or cfg_with()
-    heat = T.heat_series(heatmap(duration, bumps), duration) if bumps else None
+    segs = segments if segments is not None else heatmap(duration, bumps) if bumps else []
     sig = signals(duration, peaks)
-    score, parts = T.score_curve(sig, duration, heat, list(proposals), cfg)
+    score, parts, heat = T.curve(segs, sig, duration, list(proposals), cfg)
     tr = transcript or talk(duration)
-    return T.find_regions(score, parts, heat, duration, tr, list(proposals), cfg, limit), tr
+    return T.find_regions(score, parts, heat, duration, tr, list(proposals), cfg, limit, need), tr
 
 
 def check_invariants(regions, tr, duration, cfg):
@@ -135,6 +136,65 @@ def test_without_replay_data_reactions_and_transcript_flags_lead():
 def test_intro_spike_is_weighed_down():
     regions, _ = pick(bumps={10.0: 1.0, 600.0: 0.6})
     assert regions[0].start <= 600.0 <= regions[0].end
+
+
+@pytest.mark.parametrize("duration", [300.0, 600.0, 700.0, 721.0, 1800.0])
+def test_play_press_spike_never_outranks_content(duration):
+    """Viewers pressing play make the graph spike at 0:00 on videos of every length."""
+    mid = duration / 2
+    regions, tr = pick(duration, bumps={8.0: 1.0, mid: 0.6})
+    assert regions[0].start <= mid <= regions[0].end, (duration, [(r.start, r.end) for r in regions])
+    # the content peak is the scale (1.00) and is labelled as the most replayed part
+    assert regions[0].replay_peak == pytest.approx(1.0, abs=0.02) and "most replayed" in regions[0].sources
+    res = T.rank(None, regions, tr, "Video", duration, cfg_with(), True, 3)  # measured-order fallback too
+    assert res.moments[0].start <= mid <= res.moments[0].end
+
+
+@pytest.mark.parametrize("duration", [3600.0, 5400.0, 7200.0, 10800.0])
+def test_wide_first_replay_segment_on_long_videos(duration):
+    """YouTube's graph has ~100 segments, so on a 2-3 h video the play-press spike is 72-108 s wide."""
+    w = duration / 100
+    vals = [1.0, 0.55] + [0.3] * 98
+    vals[50] = 0.85
+    segs = [{"start_time": k * w, "end_time": (k + 1) * w, "value": v} for k, v in enumerate(vals)]
+    regions, _ = pick(duration, segments=segs)
+    assert regions[0].start <= 50.5 * w <= regions[0].end, [(r.start, r.end) for r in regions[:3]]
+
+
+def test_strongest_saturated_reactions_rank_first():
+    """With no replay data the top 1 % of reaction seconds all reach 1.0: strength, not time, orders them."""
+    peaks = {200.0 + 300 * k: 2.0 + 0.1 * k for k in range(10)}  # the latest is the strongest
+    regions, _ = pick(3200.0, peaks=peaks, limit=3)
+    assert regions[0].start <= 2900.0 <= regions[0].end, [(r.start, r.end) for r in regions]
+
+
+def test_one_broad_hill_is_one_moment():
+    """A long popular stretch is one moment; a separate, lower replay spike is the next one."""
+    bumps = {500.0 + 10 * k: 0.35 for k in range(15)}  # a broad hill 500-640 s
+    bumps[1000.0] = 0.45
+    regions, _ = pick(1500.0, bumps=bumps, limit=3, need=3)
+    assert any(r.start <= 1000.0 <= r.end for r in regions[:2]), [(r.start, r.end) for r in regions]
+
+
+def test_regions_have_room_for_a_full_clip_on_long_videos():
+    bumps = {200.0 + 70 * k: 0.4 + 0.05 * (k % 3) for k in range(12)}
+    regions, tr = pick(1500.0, bumps=bumps, limit=8)
+    cfg = cfg_with()
+    check_invariants(regions, tr, 1500.0, cfg)
+    assert all(r.duration >= 0.9 * cfg.top.min_len_s for r in regions), [r.duration for r in regions]
+
+
+def test_cramped_video_still_gets_the_moments_it_needs():
+    regions, tr = pick(200.0, bumps={30.0: 0.8, 100.0: 0.9, 170.0: 0.7}, limit=8, need=3)
+    assert len(regions) >= 2
+    check_invariants(regions, tr, 200.0, cfg_with())
+
+
+@pytest.mark.parametrize("duration,spike", [(40.4, 40.2), (300.3, 300.1)])
+def test_peak_in_the_last_partial_second_stays_inside_the_clip(duration, spike):
+    regions, tr = pick(duration, peaks={spike: 5.0})
+    assert regions and all(r.start <= r.peak <= r.end <= duration for r in regions)
+    assert any(r.end >= duration - 1 for r in regions)
 
 
 def test_short_video_is_one_whole_moment():
@@ -255,6 +315,28 @@ def test_rank_with_scripted_backend_and_prompt_is_data_safe(tmp_path):
     assert msg.count("<region ") == len(regions) and "Pick the best 3" in msg
 
 
+def test_scripted_order_ignores_regions_that_do_not_exist():
+    pick_fn = make_script({"top_order": [3, 0, 1, 2]})
+    out = pick_fn("top_rank", {"regions": [[0, 40, 20]], "count": 3, "texts": ["a b c"]})
+    assert [p["region"] for p in out["picks"]] == [1]
+
+
+def test_estimate_knows_a_cached_ranking_is_free(tmp_path):
+    from clip_scanner.top_run import ranking_estimate
+
+    regions, tr = regions_for_ranking()
+    cfg = cfg_with()
+    llm = LLM(cfg, tmp_path, CostTracker(cfg), backend="scripted", script=make_script({}))
+    req = T.ranking_request(regions, tr, "Video", 1200.0, cfg, True, 3)
+    first = ranking_estimate(cfg, req, regions, llm)
+    assert first["uncached"] == 1 and first["expected_usd"] > 0
+    T.rank(llm, regions, tr, "Video", 1200.0, cfg, True, 3)
+    again = ranking_estimate(cfg, req, regions, llm)
+    assert again["uncached"] == 0 and again["expected_usd"] == 0
+    llm.refresh = True
+    assert ranking_estimate(cfg, req, regions, llm)["uncached"] == 1
+
+
 def test_rank_through_claude_code(tmp_path, monkeypatch):
     """The ranking call goes through the subscription backend like every other Claude call."""
     import stat
@@ -327,3 +409,121 @@ def test_cli_top_mode_on_sample(tmp_path):
     assert main(args + ["--mode", "great", "--no-cut", "--yes"]) == 0
     dirs = sorted(p.name for p in (tmp_path / "out").iterdir())
     assert len(dirs) == 2 and any(d.endswith("-top-SCRIPTED-TEST") for d in dirs)
+
+
+@pytest.mark.e2e
+def test_failed_or_declined_ranking_keeps_the_earlier_result(tmp_path, monkeypatch):
+    """A Claude-ranked result is never swapped for a weaker one: a plan limit or a declined approval on a
+    re-scan puts the earlier report and clips back."""
+    from clip_scanner import llm as llm_mod
+    from clip_scanner.cli import main
+    from conftest import pick_asr
+
+    backend, model = pick_asr()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[general]\ncache_dir = "{tmp_path / "cache"}"\noutput_dir = "{tmp_path / "out"}"\n'
+                   f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n[judging]\nconfirm_above_usd = 0.0\n')
+    args = [str(FIX), "--config", str(cfg), "--judge-backend", "scripted"]
+    assert main(args + ["--yes"]) == 0  # approved: ranked by the (scripted) model
+    rep_path = next((tmp_path / "out").glob("*-top-SCRIPTED-TEST/report.json"))
+    first = json.loads(rep_path.read_text())
+    clip = Path(first["moments"][0]["file"])
+    assert first["ranking"]["method"] == "claude" and clip.exists()
+
+    # Cached ranking: free, so no approval is needed even with a $0 limit (stdin is not a terminal here).
+    assert main(args) == 0
+
+    # The plan limit hits on a fresh ranking request: the earlier result stays.
+    real_call = llm_mod.LLM.call
+
+    def limit(self, **kw):
+        if kw["purpose"] == "top_rank":
+            raise llm_mod.LLMError("usage_limit", "plan limit reached")
+        return real_call(self, **kw)
+
+    monkeypatch.setattr(llm_mod.LLM, "call", limit)
+    assert main(args + ["--yes", "--rerun", "judging"]) == 3
+    kept = json.loads(rep_path.read_text())
+    assert kept["ranking"]["method"] == "claude" and kept["moments"] == first["moments"] and clip.exists()
+    monkeypatch.setattr(llm_mod.LLM, "call", real_call)
+
+    # Declined (non-interactive, over the limit): cancel, and the earlier result stays.
+    assert main(args + ["--rerun", "judging"]) == 3
+    kept = json.loads(rep_path.read_text())
+    assert kept["moments"] == first["moments"] and clip.exists()
+    assert not (rep_path.parent / ".previous-run").exists()
+
+    # With no earlier result, a failed ranking still delivers the moments in measured order.
+    other = tmp_path / "other.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(FIX), "-t", "39", "-c", "copy", str(other)], check=True)
+    monkeypatch.setattr(llm_mod.LLM, "call", limit)
+    assert main([str(other), *args[1:], "--yes"]) == 0
+    rep = json.loads(next((tmp_path / "out").glob("other-*-top-SCRIPTED-TEST/report.json")).read_text())
+    assert rep["status"] == "partial" and rep["ranking"]["method"] == "signals" and rep["moments"][0]["file"]
+
+
+@pytest.mark.e2e
+def test_use_claude_off_makes_no_claude_calls(tmp_path, monkeypatch):
+    from clip_scanner import llm as llm_mod
+    from clip_scanner.cli import main
+    from conftest import pick_asr
+
+    backend, model = pick_asr()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[general]\ncache_dir = "{tmp_path / "cache"}"\noutput_dir = "{tmp_path / "out"}"\n'
+                   f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n[top]\nuse_claude = false\n')
+
+    def no_calls(self, **kw):
+        raise AssertionError(f"unexpected Claude call: {kw['purpose']}")
+
+    monkeypatch.setattr(llm_mod.LLM, "call", no_calls)
+    assert main([str(FIX), "--config", str(cfg), "--judge-backend", "scripted"]) == 0
+    rep = json.loads(next((tmp_path / "out").glob("*-top-SCRIPTED-TEST/report.json")).read_text())
+    assert rep["status"] == "complete" and rep["ranking"]["method"] == "signals" and rep["moments"]
+
+
+def direct(score: np.ndarray, duration: float, limit: int = 8, need: int = 0, cfg=None):
+    """find_regions on a hand-made score curve (one value per second)."""
+    cfg = cfg or cfg_with()
+    zeros = np.zeros(len(score))
+    tr = talk(duration)
+    return T.find_regions(score, {"reaction": zeros, "flags": zeros}, None, duration, tr, [], cfg, limit, need), tr
+
+
+def spikes(duration: float, peaks: dict[float, float], width: float = 3.0, base: float = 0.05) -> np.ndarray:
+    t = np.arange(int(np.ceil(duration))) + 0.5
+    score = np.full(len(t), base)
+    for c, h in peaks.items():
+        score = np.maximum(score, h * np.clip(1 - np.abs(t - c) / width, 0, 1))
+    return score
+
+
+def test_hill_slope_is_not_a_second_moment():
+    t = np.arange(1500) + 0.5
+    score = np.where((t >= 400) & (t <= 700), 1.0 - 0.3 * np.abs(t - 550) / 150, 0.05)  # one broad hill
+    score = np.maximum(score, spikes(1500.0, {1100.0: 0.6}))                              # a separate moment
+    regions, _ = direct(score, 1500.0, limit=3)
+    assert regions[0].start <= 550 <= regions[0].end
+    assert regions[1].start <= 1100 <= regions[1].end, [(r.start, r.end, r.peak) for r in regions]
+    # ...but when nothing else is left, the slope is still offered rather than too few moments
+    only_hill = np.where((t >= 400) & (t <= 700), 1.0 - 0.3 * np.abs(t - 550) / 150, 0.0)
+    assert len(direct(only_hill, 1500.0, limit=3, need=2)[0]) >= 2
+
+
+def test_no_squeezed_sub_minute_region_when_there_is_room_elsewhere():
+    score = spikes(1500.0, {300.0: 1.0, 410.0: 0.95, 350.0: 0.9, 900.0: 0.5, 1200.0: 0.4})
+    regions, tr = direct(score, 1500.0, limit=5)
+    cfg = cfg_with()
+    check_invariants(regions, tr, 1500.0, cfg)
+    assert all(r.duration >= 0.9 * cfg.top.min_len_s for r in regions), [(r.start, r.end) for r in regions]
+    assert not any(r.start <= 350 <= r.end and not r.start <= 300 <= r.end and not r.start <= 410 <= r.end
+                   for r in regions)
+
+
+@pytest.mark.parametrize("duration", [40.4, 300.3])
+def test_peak_in_the_final_partial_second(duration):
+    score = np.full(int(np.ceil(duration)), 0.05)
+    score[-1] = 1.0
+    regions, _ = direct(score, duration, limit=3)
+    r = regions[0]
+    assert r.start <= r.peak <= r.end <= duration and r.end >= duration - 1, (r.start, r.end, r.peak)

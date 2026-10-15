@@ -86,7 +86,7 @@ def make_script(rules: dict) -> ScriptFn:
         if purpose == "top_rank":
             # Measured order, or the region numbers in rules["top_order"]; each keeps its own edges.
             regions = meta.get("regions", [])
-            order = rules.get("top_order") or list(range(1, len(regions) + 1))
+            order = [k for k in rules.get("top_order") or range(1, len(regions) + 1) if 1 <= k <= len(regions)]
             picks = []
             for k in order[: meta.get("count", 3)]:
                 s, e, peak = regions[k - 1]

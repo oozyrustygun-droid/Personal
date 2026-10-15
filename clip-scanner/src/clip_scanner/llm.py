@@ -142,6 +142,19 @@ class LLM:
                 return None
         return None
 
+    def is_cached(self, *, purpose: str, model: str, system: list[dict], messages: list[dict],
+                  output: type[BaseModel], effort: str, meta: dict | None = None,
+                  allow_fallback: bool = False) -> bool:
+        """True if call() with these arguments would be answered from the response cache (costs nothing)."""
+        if self.refresh:
+            return False
+        rh = self.request_hash(model=model, system=system, messages=messages, schema=strict_schema(output),
+                               effort=effort, fallbacks=self.use_fallbacks(model, allow_fallback))
+        if self.backend == "scripted":
+            rh = self.scripted_hash(purpose, meta or {}, rh)
+        hit = self.cached_result(purpose, rh)
+        return hit is not None and not ("error" in hit and self.backend == "claude-code")
+
     def use_fallbacks(self, model: str, allow_fallback: bool) -> bool:
         return (self.backend == "anthropic" and allow_fallback and self.cfg.judging.server_fallbacks
                 and model in FALLBACK_MODELS)

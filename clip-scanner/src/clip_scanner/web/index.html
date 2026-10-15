@@ -258,14 +258,16 @@ function jobCard(j) {
     extra += `<div class="hint">Judging on your Claude plan through Claude Code: no API charges · about ${e.expected_calls} model call${e.expected_calls === 1 ? "" : "s"} (at most ${e.worst_case_calls}), counted toward your plan's usage limits</div>`;
   }
   if (j.status === "awaiting_approval" && j.estimate) {
-    const e = j.estimate;
-    extra += `<div class="approve"><div>Judging ${e.uncached} candidate${e.uncached === 1 ? "" : "s"} with ${esc(e.model)} (effort ${esc(e.effort)})</div>
+    const e = j.estimate, top = j.mode === "top";
+    const what = top ? `Ranking ${e.candidates} candidate moment${e.candidates === 1 ? "" : "s"} with ${esc(e.model)} (one call)`
+      : `Judging ${e.uncached} candidate${e.uncached === 1 ? "" : "s"} with ${esc(e.model)} (effort ${esc(e.effort)})`;
+    extra += `<div class="approve"><div>${what}</div>
       <div><b>~${usd(e.expected_usd)}</b> expected <span class="hint">· worst case ${usd(e.worst_case_usd)} · your limit ${usd(e.threshold)}</span></div>
-      <div class="row"><button class="primary" data-approve="${j.id}">Approve &amp; judge</button><button class="danger" data-cancel="${j.id}">Cancel</button></div></div>`;
+      <div class="row"><button class="primary" data-approve="${j.id}">${top ? "Approve &amp; rank" : "Approve &amp; judge"}</button><button class="danger" data-cancel="${j.id}">Cancel</button></div></div>`;
   }
   if (j.status === "done" && j.report_dir) {
     extra += `<div class="row"><button class="primary small" data-open="${esc(j.report_dir)}">View results</button>
-      ${j.result_status === "unavailable" ? '<span class="hint">Judging did not run (any earlier results for this video were kept).</span>' : ""}
+      ${j.result_status === "unavailable" ? `<span class="hint">${j.mode === "top" ? "Claude's ranking didn't run" : "Judging did not run"} (any earlier results for this video were kept).</span>` : ""}
       ${j.result_status === "incomplete" ? '<span class="hint">Incomplete: this is not a full verdict on the video. Re-add the link to finish.</span>' : ""}
       ${j.result_status === "partial" ? '<span class="hint">Some of the analysis couldn\'t run this time (see notes); re-add the link to retry it. Everything finished is cached.</span>' : ""}</div>`;
   }
