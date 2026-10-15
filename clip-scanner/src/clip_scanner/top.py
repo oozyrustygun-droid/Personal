@@ -83,12 +83,16 @@ def _heat_points(segments: list[dict]) -> list[tuple[float, float, float]]:
 
 def edge_windows(segments: list[dict], duration: float, cfg: Config) -> tuple[float, float]:
     """(head_s, tail_s): the stretches at the start (people pressing play, skipping the intro) and at the end
-    (the end card) that are weighed down. Scaled to short videos; on long ones the head also covers the replay
-    graph's first segment, which YouTube makes duration/100 wide, so a play-press spike can't outlast it."""
+    (the end card) that are weighed down. Scaled to short videos. On long ones YouTube's graph segments are
+    duration/100 wide, so the head also runs to the bottom of the graph's opening decline (within the first
+    10 % of the video): a play-press spike spread over several segments can't outlast it."""
     head = min(cfg.top.skip_intro_s, 0.1 * duration)
     pts = _heat_points(segments)
     if pts:
-        head = max(head, 1.5 * pts[0][1])
+        k = 0
+        while k + 1 < len(pts) and pts[k + 1][2] < pts[k][2] and pts[k + 1][0] <= 0.1 * duration:
+            k += 1
+        head = max(head, 1.5 * pts[0][1], pts[k][0])
     return min(head, 0.25 * duration), min(15.0, 0.05 * duration)
 
 
@@ -221,41 +225,44 @@ def fit_length(s: float, e: float, focus: float, lo: float, hi: float, cfg: Conf
     return s, e
 
 
-def _shoulder(score: np.ndarray, taken: np.ndarray, p: int, a: int, b: int) -> bool:
-    """The core a..b around peak p runs into an earlier pick's hill, still rising toward it with no real dip
-    in between: it is that hill's slope, not a moment of its own."""
+def _shoulder(score: np.ndarray, near: np.ndarray, peaks: list[int], p: int, a: int, b: int) -> bool:
+    """The core a..b around peak p runs into a picked hill (or a slope already traced from one) that is higher
+    there, and the score never dips below SHOULDER_DIP of p's own between that pick's peak and p: it is the
+    hill's slope, not a moment of its own. A separate moment whose crest hides in a pick's gap zone has its dip
+    between the two peaks, so it is kept."""
     v = float(score[p])
-    if a > 0 and taken[a - 1] and score[a - 1] > v and float(score[a: p + 1].min()) >= SHOULDER_DIP * v:
-        return True
-    return bool(b < len(score) - 1 and taken[b + 1] and score[b + 1] > v
-                and float(score[p: b + 1].min()) >= SHOULDER_DIP * v)
+    floor = SHOULDER_DIP * v
+    if a > 0 and near[a - 1] and score[a - 1] > v:
+        left = [q for q in peaks if q < p]
+        q = max(left) if left else a
+        if float(score[min(q, a): p + 1].min()) >= floor:
+            return True
+    if b < len(score) - 1 and near[b + 1] and score[b + 1] > v:
+        right = [q for q in peaks if q > p]
+        q = min(right) if right else b
+        if float(score[p: max(q, b) + 1].min()) >= floor:
+            return True
+    return False
 
 
-def find_regions(score: np.ndarray, parts: dict[str, np.ndarray], heat: np.ndarray | None, duration: float,
-                 transcript: Transcript, proposals: list, cfg: Config, limit: int, need: int = 0) -> list[Region]:
-    """The best-scoring non-overlapping clip windows, best first. A first pass keeps only distinct moments with
-    room for a full-length clip; if that yields fewer than `need`, slopes of a picked hill and clips squeezed
-    between picks (down to half of min_len_s) are allowed too."""
+def _greedy(score: np.ndarray, duration: float, words: list[Word], sentences, cfg: Config, limit: int,
+            need: int, strict: bool) -> list[tuple[float, float, float, float, int]]:
+    """Pick (start, end, focus, score, peak index) windows, best first. Strict: only distinct moments with
+    room for a full-length clip; if that yields fewer than `need`, continue with the rest allowed."""
     tc = cfg.top
-    sentences = split_sentences(transcript.words, cfg.candidates.pause_break_s)
-    if duration <= tc.min_len_s:
-        s, e = 0.0, duration
-        peak = int(np.argmax(score)) if score.size else 0
-        return [_describe(Region(s, e, min(float(peak) + 0.5, duration), float(score[peak]) if score.size else 0.0,
-                                 s, e), parts, heat, proposals)]
     n = len(score)
     taken_mask = np.zeros(n, dtype=bool)   # picked clips plus min_gap_s around them
     skipped = np.zeros(n, dtype=bool)      # peaks passed over in this pass
-    taken: list[tuple[float, float]] = []
-    out: list[Region] = []
-    strict = True
+    slope = np.zeros(n, dtype=bool)        # cores skipped as a pick's slope: the slope continues past them
+    out: list[tuple[float, float, float, float, int]] = []
     while len(out) < limit:
         masked = taken_mask | skipped
         avail = np.where(masked, -np.inf, score)
         p = int(np.argmax(avail))
         if not np.isfinite(avail[p]):
             if strict and len(out) < need:
-                strict, skipped[:] = False, False  # too few distinct moments: take the near-misses too
+                strict = False  # too few distinct moments: take the near-misses too
+                skipped[:] = slope[:] = False
                 continue
             break
         v = float(score[p])
@@ -264,22 +271,43 @@ def find_regions(score: np.ndarray, parts: dict[str, np.ndarray], heat: np.ndarr
             a -= 1
         while b < n - 1 and not masked[b + 1] and score[b + 1] >= CORE_FRAC * v and b - p < tc.max_len_s / 2:
             b += 1
-        if strict and _shoulder(score, taken_mask, p, a, b):
-            skipped[a: b + 1] = True
+        if strict and _shoulder(score, taken_mask | slope, [x[4] for x in out], p, a, b):
+            skipped[a: b + 1] = slope[a: b + 1] = True
             continue
-        free_lo = max([e for _, e in taken if e <= p] + [0.0])
-        free_hi = min([s for s, _ in taken if s >= p + 1] + [duration])
+        free_lo = max([x[1] for x in out if x[1] <= p] + [0.0])
+        free_hi = min([x[0] for x in out if x[0] >= p + 1] + [duration])
         focus = min(p + 0.5, duration)
         s, e = fit_length(a - tc.lead_s, b + 1 + tc.tail_s, focus, free_lo, free_hi, cfg)
-        s, e = snap_edges(s, e, free_lo, free_hi, transcript.words, sentences, tc.max_len_s)
-        shortest = (0.9 if strict else 0.5) * min(tc.min_len_s, duration)
-        if e - s < shortest or not s <= focus <= e:
+        room = e - s  # what fits between earlier picks (snapping below trims up to SNAP_S per edge)
+        s, e = snap_edges(s, e, free_lo, free_hi, words, sentences, tc.max_len_s)
+        floor = min(tc.min_len_s, duration)
+        if (strict and room < 0.9 * floor) or e - s < 0.5 * floor or not s <= focus <= e:
             skipped[a: b + 1] = True  # squeezed between earlier picks: no room for a clip of its own
             continue
-        taken.append((s, e))
-        lo_mask = max(0, int(s - tc.min_gap_s))
-        taken_mask[lo_mask: min(n, int(math.ceil(e + tc.min_gap_s)))] = True
-        out.append(_describe(Region(s, e, focus, v, s, e), parts, heat, proposals))
+        out.append((s, e, focus, v, p))
+        taken_mask[max(0, int(s - tc.min_gap_s)): min(n, int(math.ceil(e + tc.min_gap_s)))] = True
+    return out
+
+
+def find_regions(score: np.ndarray, parts: dict[str, np.ndarray], heat: np.ndarray | None, duration: float,
+                 transcript: Transcript, proposals: list, cfg: Config, limit: int, need: int = 0) -> list[Region]:
+    """The best-scoring non-overlapping clip windows, best first. Distinct moments with room for a full-length
+    clip come first; if there are fewer than `need`, slopes of a picked hill and clips squeezed between picks
+    (down to half of min_len_s) are allowed too."""
+    tc = cfg.top
+    sentences = split_sentences(transcript.words, cfg.candidates.pause_break_s)
+    if duration <= tc.min_len_s:
+        s, e = 0.0, duration
+        peak = int(np.argmax(score)) if score.size else 0
+        return [_describe(Region(s, e, min(float(peak) + 0.5, duration), float(score[peak]) if score.size else 0.0,
+                                 s, e), parts, heat, proposals)]
+    picks = _greedy(score, duration, transcript.words, sentences, cfg, limit, need, strict=True)
+    if len(picks) < need:
+        # Strict picks can take the room a skipped slope needed: start over with everything allowed.
+        alt = _greedy(score, duration, transcript.words, sentences, cfg, limit, need, strict=False)
+        if len(alt) > len(picks):
+            picks = alt
+    out = [_describe(Region(s, e, focus, v, s, e), parts, heat, proposals) for s, e, focus, v, _ in picks]
     # How far Claude may move each edge: ADJUST_S, never into another region.
     for r in out:
         r.lo = max([x.end for x in out if x.end <= r.start] + [0.0, r.start - ADJUST_S])
@@ -413,6 +441,7 @@ class TopResult:
     recall_incomplete: bool = False  # the transcript proposer missed part of the video (no replay data)
     cancelled: bool = False          # the ranking didn't run and nothing was exported
     error: str = ""                  # why Claude couldn't rank (method "signals" after a failed call)
+    error_final: bool = False        # that failure repeats on every re-run until the request changes
 
 
 def _fallback_title(r: Region) -> str:
@@ -491,12 +520,17 @@ def rank(llm: LLM | None, regions: list[Region], transcript: Transcript, title: 
             return TopResult(moments, regions, "claude", has_heat, notes, res.served_model)
         except LLMError as e:
             error = str(e)
+            # Refusals and unusable answers are cached on the API backend, so asking again gives the same.
+            final = e.kind in ("refusal", "schema") and (e.cached or llm.backend != "claude-code")
             if console:
                 console.print(f"  [yellow]Claude couldn't rank the moments ({error}).[/yellow]")
             moments = [Moment(k + 1, r.start, r.end, r.peak, _fallback_title(r), _fallback_why(r), "", r)
                        for k, r in enumerate(regions[:count])]
             notes.append(f"Claude couldn't rank the moments ({error}); they are in measured order instead.")
-            return TopResult(moments, regions, "signals", has_heat, notes, error=error)
+            if final:
+                notes.append("Asking again returns the same answer; to make Claude rank afresh, re-scan from the "
+                             "command line with --rerun judging.")
+            return TopResult(moments, regions, "signals", has_heat, notes, error=error, error_final=final)
     moments = [Moment(k + 1, r.start, r.end, r.peak, _fallback_title(r), _fallback_why(r), "", r)
                for k, r in enumerate(regions[:count])]
     return TopResult(moments, regions, "signals", has_heat, notes)

@@ -11,8 +11,8 @@ from .candidates import cached_proposals, candidates_stage
 from .cli_common import BACKEND_LABEL, resolve_backend
 from .config import Config
 from .cost import CostTracker, estimate_tokens
-from .export import (STASH, _is_in_progress, _render_cached, make_poster, prune_stale_clips, render_span,
-                     restore_all, restore_exports, slug, stash_exports)
+from .export import (STASH, _render_cached, make_poster, prune_stale_clips, render_span, restore_all,
+                     restore_exports, slug, stash_exports)
 from .ui import console, emit, fmt_ts, stage
 
 MOMENTS_DIR = "clips"
@@ -127,16 +127,18 @@ def run_top(args: argparse.Namespace, cfg: Config, confirm) -> dict:
     # Claude was meant to rank but didn't. Never replace a finished Claude-ranked result for this video with
     # a weaker one: put it back. A declined approval means cancel: nothing is ranked or exported.
     failed = use_claude and not declined and result.method != "claude"
-    if declined or (failed and previous_was_ranked(out_dir)):
+    if declined or (failed and not result.error_final and previous_was_ranked(out_dir)):
         why = ("Ranking wasn't approved, so nothing was ranked or exported." if declined
                else f"Claude couldn't rank the moments this time ({result.error}). Your earlier results for this "
                     f"video were kept; re-run later to refresh them.")
         result.notes = [n for n in result.notes if not n.startswith("Claude couldn't rank")]
-        if restore_all(out_dir) and not _is_in_progress(out_dir / "report.json"):
+        # stash_exports only sets a FINISHED report aside. Without one, leave any stashed renders out of sight
+        # (a later approved run reuses those that still match) so the folder matches this report.
+        if (out_dir / STASH / "report.json").exists() and restore_all(out_dir):
             console.print(f"[yellow]{why} The previous report and clips were left in place.[/yellow]")
         else:
-            result.moments, result.cancelled = [], True
-            result.notes = [*result.notes, why]
+            result.moments, result.cancelled, result.method = [], True, "none"
+            result.notes = [*notes, why]
             write_top_reports(meta, transcript, sig, result, cfg, out_dir, {}, tracker, llm, scripted)
             console.print(f"[yellow]{why}[/yellow]")
         return {"code": 3, "out_dir": out_dir, "status": "unavailable", "notes": [*notes, why]}

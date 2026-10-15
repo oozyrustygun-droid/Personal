@@ -327,7 +327,8 @@ def render_top_markdown(rep: dict) -> str:
     v = rep["video"]
     rk = rep["ranking"]
     how = (f"Claude ({rk['model']}) picked them from {rk['regions_considered']} measured regions"
-           if rk["method"] == "claude" else f"ranked by measured signals ({rk['regions_considered']} regions)")
+           if rk["method"] == "claude" else "not ranked" if rk["method"] == "none"
+           else f"ranked by measured signals ({rk['regions_considered']} regions)")
     L = [f"# clip-scanner report: {v['title']}", "",
          f"- Source: {v['url'] or v['source']}",
          f"- Duration: {fmt_ts(v['duration'])} · transcript: {rep['transcript']['backend']}/"

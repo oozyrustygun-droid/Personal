@@ -60,6 +60,7 @@ ScriptFn = Callable[[str, dict], dict]
 _UNSUPPORTED_KEYS = {"title", "default", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
                      "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems",
                      "examples"}
+_NAME_MAPS = {"properties", "$defs", "definitions", "patternProperties"}
 
 
 def strict_schema(model: type[BaseModel]) -> dict:
@@ -70,9 +71,11 @@ def strict_schema(model: type[BaseModel]) -> dict:
     """
     schema = copy.deepcopy(model.model_json_schema())
 
-    def walk(node: Any) -> Any:
+    def walk(node: Any, names: bool = False) -> Any:
         if isinstance(node, dict):
-            node = {k: walk(v) for k, v in node.items() if k not in _UNSUPPORTED_KEYS}
+            if names:  # a map of property / definition names (a field may be called "title"), not keywords
+                return {k: walk(v) for k, v in node.items()}
+            node = {k: walk(v, names=k in _NAME_MAPS) for k, v in node.items() if k not in _UNSUPPORTED_KEYS}
             if node.get("type") == "object" or "properties" in node:
                 node["additionalProperties"] = False
                 node["required"] = list(node.get("properties", {}).keys())

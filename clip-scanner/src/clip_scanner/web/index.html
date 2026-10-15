@@ -405,7 +405,8 @@ function topReport(rep, dir) {
   const rk = rep.ranking || {};
   const vcls = rep.status === "in_progress" ? "incomplete" : ms.length ? (rep.status === "partial" ? "incomplete" : "great") : "none";
   const notes = (rep.notes || []).concat(rep.signals_notes || []).map((n) => `<div class="hint">⚠ ${esc(n)}</div>`).join("");
-  const how = rk.method === "claude" ? `Claude picked them from ${rk.regions_considered} measured regions` : `ranked by measured signals (${rk.regions_considered ?? 0} regions)`;
+  const how = rk.method === "claude" ? `Claude picked them from ${rk.regions_considered} measured regions`
+    : rk.method === "none" ? "not ranked" : `ranked by measured signals (${rk.regions_considered ?? 0} regions)`;
   let html = "";
   if (rep.judge_backend === "scripted") html += `<div class="banner">SCRIPTED TEST RANKING: not Claude's picks. Don't post from this report.</div>`;
   html += `<div class="verdict ${vcls}"><h3>${ms.length ? "🎬" : "❌"} ${esc(rep.verdict)}</h3>

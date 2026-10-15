@@ -527,3 +527,166 @@ def test_peak_in_the_final_partial_second(duration):
     regions, _ = direct(score, duration, limit=3)
     r = regions[0]
     assert r.start <= r.peak <= r.end <= duration and r.end >= duration - 1, (r.start, r.end, r.peak)
+
+
+# ---- second review round ------------------------------------------------------------------------
+
+def graph(duration: float, bumps: dict[float, tuple[float, float]], base: float = 0.2, n: int = 100) -> list[dict]:
+    """A replay graph with bumps {centre: (height, sigma)}."""
+    w = duration / n
+    out = []
+    for k in range(n):
+        c = (k + 0.5) * w
+        v = base + sum(h * np.exp(-0.5 * ((c - t) / sg) ** 2) for t, (h, sg) in bumps.items())
+        out.append({"start_time": k * w, "end_time": (k + 1) * w, "value": float(v)})
+    return out
+
+
+@pytest.mark.parametrize("model", ["JudgeVerdict", "DevilsCase", "ArbiterRuling", "Packaging", "Diagnosis",
+                                   "Proposals", "TopRanking"])
+def test_schema_sent_to_claude_keeps_every_field(model):
+    """Field names that are also JSON-schema keywords (TopPick.title) must survive: with additionalProperties
+    false, a field missing from the schema can never be answered and every reply fails validation."""
+    from pydantic import BaseModel
+
+    from clip_scanner.judging import schemas
+    from clip_scanner import proposer
+    from clip_scanner.llm import strict_schema
+
+    cls = getattr(schemas, model, None) or getattr(proposer, model, None) or getattr(T, model)
+    schema = strict_schema(cls)
+
+    def resolve(node):
+        return schema["$defs"][node["$ref"].split("/")[-1]] if "$ref" in node else node
+
+    def check(m: type[BaseModel], node):
+        node = resolve(node)
+        assert set(node["properties"]) == set(m.model_fields), (m.__name__, sorted(node["properties"]))
+        assert set(node["required"]) == set(m.model_fields)
+        for name, f in m.model_fields.items():
+            ann = f.annotation
+            inner = getattr(ann, "__args__", (ann,))[0] if getattr(ann, "__origin__", None) is list else ann
+            if isinstance(inner, type) and issubclass(inner, BaseModel):
+                sub = node["properties"][name]
+                check(inner, sub["items"] if sub.get("type") == "array" else sub)
+
+    check(cls, schema)
+
+
+def test_moment_with_crest_in_the_gap_zone_is_kept():
+    """Its own crest hides in the earlier pick's gap zone, but the score dips well below it in between."""
+    d = 284.0
+    segs = graph(d, {30.0: (0.83, 11.0), 83.0: (0.52, 21.0), 186.0: (0.48, 59.0)})
+    regions, _ = pick(d, segments=segs, limit=8, need=3)
+    assert len(regions) >= 3 and any(r.start <= 83 <= r.end for r in regions[:3]), \
+        [(r.start, r.end, r.peak) for r in regions]
+
+
+def test_second_most_replayed_moment_stays_in_the_top_three():
+    regions, _ = pick(900.0, bumps={300.0: 0.9, 360.0: 0.75, 600.0: 0.5, 760.0: 0.45, 150.0: 0.55}, need=3)
+    assert any(r.start <= 362 <= r.end and r.peak >= 350 for r in regions[:3]), \
+        [(r.start, r.end, r.peak) for r in regions[:4]]
+
+
+def test_relaxed_pass_restores_the_count_when_clips_fit():
+    d = 378.1
+    segs = graph(d, {45.0: (0.27, 24.0), 177.0: (0.70, 25.0), 260.0: (0.96, 51.0), 298.0: (0.10, 42.0),
+                     321.0: (0.50, 44.0)})
+    regions, tr = pick(d, segments=segs, limit=8, need=3)
+    assert len(regions) >= 3
+    check_invariants(regions, tr, d, cfg_with())
+
+
+def test_sharp_spike_is_not_squeezed_by_sentence_snapping():
+    """The nearest sentence edges trim a free 63 s window to 52 s; that's snapping, not a lack of room."""
+    d = 300.0
+    ends = [100.0, 119.9, 140.0, 160.0, 172.1, 195.0, 220.0, 250.0, 280.0]  # sentence ends (seconds)
+    words, t = [], 0.5
+    while t < d - 1:
+        last = any(abs(t + 0.28 - x) < 0.18 for x in ends)
+        words.append(Word(round(t, 2), round(t + 0.28, 2), "word." if last else "word"))
+        t += 0.35
+    tr = Transcript(words=words)
+    vals = [0.3] * 100
+    vals[50] = 1.0
+    for i, v in ((15, 0.6), (80, 0.55), (92, 0.5)):
+        vals[i] = v
+    segs = [{"start_time": i * 3.0, "end_time": (i + 1) * 3.0, "value": v} for i, v in enumerate(vals)]
+    regions, _ = pick(d, segments=segs, transcript=tr, need=3)
+    assert regions[0].start <= 151.5 <= regions[0].end, [(r.start, r.end, r.peak) for r in regions]
+
+
+def test_gradual_hill_slopes_do_not_crowd_out_a_separate_moment():
+    t = np.arange(1500) + 0.5
+    hill = np.where((t >= 400) & (t <= 700), 1.0 - 0.3 * np.abs(t - 550) / 150, 0.0)
+    sides = np.where(t < 400, 0.7 - 0.65 * np.clip((400 - t) / 200, 0, 1),
+                     np.where(t > 700, 0.7 - 0.65 * np.clip((t - 700) / 200, 0, 1), 0.0))
+    score = np.maximum(np.maximum(hill, sides), spikes(1500.0, {1100.0: 0.46}))
+    regions, _ = direct(score, 1500.0, limit=8, need=3)
+    assert any(r.start <= 1100 <= r.end for r in regions[:2]), [(r.start, r.end, r.peak) for r in regions[:4]]
+
+
+@pytest.mark.parametrize("duration", [3000.0, 3600.0, 7200.0])
+def test_play_press_spike_over_two_segments(duration):
+    w = duration / 100
+    vals = [1.0, 0.9, 0.45] + [0.3] * 97
+    vals[50] = 0.85
+    segs = [{"start_time": k * w, "end_time": (k + 1) * w, "value": v} for k, v in enumerate(vals)]
+    regions, _ = pick(duration, segments=segs)
+    assert regions[0].start <= 50.5 * w <= regions[0].end, [(r.start, r.end) for r in regions[:3]]
+    assert regions[0].replay_peak == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.e2e
+def test_repeating_failure_delivers_the_new_result_not_the_old(tmp_path, monkeypatch):
+    """A refusal is cached on the API backend: restoring the old result would repeat forever."""
+    from clip_scanner import llm as llm_mod
+    from clip_scanner.cli import main
+    from conftest import pick_asr
+
+    backend, model = pick_asr()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[general]\ncache_dir = "{tmp_path / "cache"}"\noutput_dir = "{tmp_path / "out"}"\n'
+                   f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n')
+    args = [str(FIX), "--config", str(cfg), "--judge-backend", "scripted"]
+    assert main(args) == 0
+    real_call = llm_mod.LLM.call
+
+    def refuse(self, **kw):
+        if kw["purpose"] == "top_rank":
+            raise llm_mod.LLMError("refusal", "declined to answer")
+        return real_call(self, **kw)
+
+    monkeypatch.setattr(llm_mod.LLM, "call", refuse)
+    assert main(args + ["--rerun", "judging"]) == 0
+    rep = json.loads(next((tmp_path / "out").glob("*-top-SCRIPTED-TEST/report.json")).read_text())
+    assert rep["ranking"]["method"] == "signals" and rep["status"] == "partial" and rep["moments"][0]["file"]
+    assert any("--rerun judging" in n for n in rep["notes"])
+
+
+@pytest.mark.e2e
+def test_cancel_after_an_interrupted_run_leaves_no_orphan_clips(tmp_path):
+    from clip_scanner.cli import main
+    from conftest import pick_asr
+
+    backend, model = pick_asr()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[general]\ncache_dir = "{tmp_path / "cache"}"\noutput_dir = "{tmp_path / "out"}"\n'
+                   f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n[judging]\nconfirm_above_usd = 0.0\n')
+    args = [str(FIX), "--config", str(cfg), "--judge-backend", "scripted"]
+    assert main(args + ["--yes"]) == 0
+    rep_path = next((tmp_path / "out").glob("*-top-SCRIPTED-TEST/report.json"))
+    clip = Path(json.loads(rep_path.read_text())["moments"][0]["file"])
+    mtime = clip.stat().st_mtime
+    # A later run was killed mid-export: its in-progress marker sits next to the rendered clip.
+    rep_path.write_text(json.dumps({"status": "in_progress", "mode": "top"}))
+    assert main(args + ["--rerun", "judging"]) == 3  # declined (not a terminal, over the $0 limit)
+    rep = json.loads(rep_path.read_text())
+    assert rep["status"] == "unavailable" and not rep["moments"] and rep["ranking"]["method"] == "none"
+    assert not any("Only 1 distinct" in n for n in rep["notes"])
+    assert not list(clip.parent.glob("*.mp4"))  # nothing on show that the report doesn't list
+    assert "not ranked" in rep_path.with_name("report.md").read_text()
+    # The next approved run reuses the set-aside render instead of encoding it again.
+    assert main(args + ["--yes"]) == 0
+    assert clip.exists() and clip.stat().st_mtime == mtime
+    assert not (rep_path.parent / ".previous-run").exists()
