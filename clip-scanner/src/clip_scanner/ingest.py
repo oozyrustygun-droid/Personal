@@ -122,6 +122,10 @@ def ingest(source: str, cfg: Config, *, console=None) -> tuple[VideoMeta, Worksp
         video_id = local_video_id(path)
 
     ws = Workspace(cfg.cache_dir / video_id)
+    if is_url(source):
+        # YouTube's "Most replayed" graph: which parts viewers jump back to (absent on many videos).
+        heat = info.get("heatmap")
+        write_json(ws.path("heatmap.json"), {"segments": heat if isinstance(heat, list) else []})
     meta_path = ws.path("meta.json")
     fp = fingerprint("ingest", INGEST_VERSION, source if is_url(source) else video_id)
 

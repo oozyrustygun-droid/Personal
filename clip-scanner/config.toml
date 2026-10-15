@@ -11,7 +11,21 @@
 [general]
 cache_dir = "~/.cache/clip-scanner"     # per-video stage cache (downloads, transcripts, judgments)
 output_dir = "./clip-scanner-output"    # reports and exported clips
-max_clips = 5                           # cap on GREAT clips reported/exported (never fills with non-GREAT)
+max_clips = 5                           # great mode: cap on GREAT clips reported/exported (never fills with non-GREAT)
+mode = "top"                            # top: always the N most clickable moments as raw 1-3 min clips (you edit)
+                                        # great: only GREAT short clips (vertical, captioned), or none
+
+[top]                                   # mode = "top"
+count = 3                               # moments returned
+min_len_s = 60.0                        # each raw clip is roughly 1-3 minutes
+max_len_s = 180.0
+lead_s = 35.0                           # build-up kept before the moment
+tail_s = 25.0                           # aftermath kept after it
+min_gap_s = 20.0                        # space between two moments
+candidates = 8                          # regions Claude compares to pick the best `count`
+skip_intro_s = 45.0                     # YouTube "most replayed" spikes here are mostly people pressing play
+use_claude = true                       # rank with one Claude call (else by measured signals only)
+effort = "medium"
 
 [ingest]
 # Best stream at or below 1080p, preferring mp4/m4a so no re-encode is needed.

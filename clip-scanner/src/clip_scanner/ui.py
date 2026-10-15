@@ -24,8 +24,8 @@ def emit(kind: str, **data) -> None:
 
 @contextmanager
 def stage(name: str, *, cached_msg: str = "cached"):
-    """Print a stage header and its wall time. Yields a dict whose 'cached' flag the caller can set."""
-    state = {"cached": False, "note": ""}
+    """Print a stage header and its wall time. Yields a dict whose 'cached' / 'skipped' flags the caller can set."""
+    state = {"cached": False, "skipped": False, "note": ""}
     console.print(f"[bold cyan]▸ {name}[/bold cyan]")
     emit("stage_start", name=name)
     t0 = time.perf_counter()
@@ -33,10 +33,12 @@ def stage(name: str, *, cached_msg: str = "cached"):
         yield state
     finally:
         dt = time.perf_counter() - t0
-        tag = f"[green]{cached_msg}[/green]" if state["cached"] else f"[dim]{dt:.1f}s[/dim]"
+        tag = ("[dim]skipped[/dim]" if state["skipped"] else f"[green]{cached_msg}[/green]" if state["cached"]
+               else f"[dim]{dt:.1f}s[/dim]")
         note = f" [dim]{state['note']}[/dim]" if state["note"] else ""
         console.print(f"  {tag}{note}")
-        emit("stage_end", name=name, seconds=round(dt, 1), cached=state["cached"], note=state["note"])
+        emit("stage_end", name=name, seconds=round(dt, 1), cached=state["cached"], skipped=state["skipped"],
+             note=state["note"])
 
 
 def fmt_ts(seconds: float) -> str:

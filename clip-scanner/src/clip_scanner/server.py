@@ -1,8 +1,9 @@
 """`clip-scanner ui`: a local web front end.
 
-Paste or drop YouTube/TikTok links, watch each scan move through the stages, approve the judging
-spend, then review GREAT clips (play, copy captions, download) or the near-misses. Scans run one
-at a time on this machine, with the same pipeline as the CLI.
+Paste or drop YouTube/TikTok links, watch each scan move through the stages, then review the results:
+in top mode the best moments as raw 1-3 minute clips; in great mode the GREAT clips (play, copy captions,
+download) or the near-misses, after approving any API spend. Scans run one at a time on this machine,
+with the same pipeline as the CLI.
 
 Security: the server listens on 127.0.0.1 only, checks the Host header (against DNS rebinding), and
 requires a per-launch token on every state-changing request, so no other website can start scans
@@ -36,18 +37,22 @@ from .ui import console
 
 WEB_DIR = Path(__file__).parent / "web"
 STAGES = ["Ingest", "Transcribe", "Signals", "Candidates", "Keyframes", "Judging", "Export"]
+TOP_STAGES = ["Ingest", "Transcribe", "Signals", "Moments", "Ranking", "Export"]
+MODES = ("top", "great")
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 class Job:
-    def __init__(self, source: str, max_clips: int | None, cut: bool):
+    def __init__(self, source: str, max_clips: int | None, cut: bool, mode: str = "great"):
         self.id = uuid.uuid4().hex[:10]
         self.source = source
         self.max_clips = max_clips
         self.cut = cut
+        self.mode = mode
         self.status = "queued"          # queued | running | awaiting_approval | done | failed | cancelled
         self.title = ""
-        self.stages = {s: {"state": "pending", "seconds": None, "note": ""} for s in STAGES}
+        self.stages = {s: {"state": "pending", "seconds": None, "note": ""}
+                       for s in (TOP_STAGES if mode == "top" else STAGES)}
         self.current = ""
         self.log: deque[str] = deque(maxlen=500)
         self.estimate: dict | None = None
@@ -68,7 +73,8 @@ class Job:
                 "log": list(self.log)[-80:], "estimate": self.estimate, "judging": self.judging,
                 "report_dir": Path(self.out_dir).name if self.out_dir else None,
                 "result_status": self.result_status, "notes": self.notes, "error": self.error, "max_clips": self.max_clips,
-                "cut": self.cut, "created": self.created, "started": self.started, "finished": self.finished}
+                "cut": self.cut, "mode": self.mode, "created": self.created, "started": self.started,
+                "finished": self.finished}
 
     # -- events from the pipeline ------------------------------------------------------------------
     def on_event(self, kind: str, data: dict) -> None:
@@ -77,7 +83,8 @@ class Job:
             self.stages[data["name"]]["state"] = "active"
         elif kind == "stage_end" and data["name"] in self.stages:
             st = self.stages[data["name"]]
-            st.update(state="cached" if data.get("cached") else "done", seconds=data.get("seconds"),
+            st.update(state="skipped" if data.get("skipped") else "cached" if data.get("cached") else "done",
+                      seconds=data.get("seconds"),
                       note=data.get("note", ""))
             if data["name"] == "Ingest" and data.get("note"):
                 self.title = data["note"].split(" · ")[0]
@@ -130,11 +137,12 @@ class Scanner:
         self.thread = threading.Thread(target=self._loop, daemon=True, name="clip-scanner-worker")
         self.thread.start()
 
-    def add(self, sources: list[str], max_clips: int | None, cut: bool) -> list[Job]:
+    def add(self, sources: list[str], max_clips: int | None, cut: bool, mode: str | None = None) -> list[Job]:
+        mode = mode if mode in MODES else load_config(self.config_path).general.mode
         new = []
         with self.lock:
             for s in sources:
-                job = Job(s, max_clips, cut)
+                job = Job(s, max_clips, cut, mode)
                 self.jobs[job.id] = job
                 new.append(job)
         self.wake.set()
@@ -187,7 +195,7 @@ class Scanner:
             job.status = "running" if job._approved else "cancelled"
             return job._approved
 
-        args = argparse.Namespace(source=job.source, config=self.config_path, max_clips=job.max_clips,
+        args = argparse.Namespace(source=job.source, config=self.config_path, max_clips=job.max_clips, mode=job.mode,
                                   no_cut=not job.cut, explain_rejects=True, dry_run=False, rerun=[], yes=False,
                                   judge_backend=self.judge_backend, scripted_judge=self.scripted_judge)
         try:
@@ -243,7 +251,8 @@ def list_reports(output_dir: Path) -> list[dict]:
         out.append({"dir": rep.parent.name, "title": data.get("video", {}).get("title", rep.parent.name),
                     "verdict": data.get("verdict", ""), "status": data.get("status", ""),
                     "generated_at": data.get("generated_at") or data.get("started_at", ""),
-                    "great": len(data.get("great_clips", []) or []), "mtime": rep.stat().st_mtime,
+                    "great": len(data.get("great_clips", []) or data.get("moments", []) or []),
+                    "mode": data.get("mode", "great"), "mtime": rep.stat().st_mtime,
                     "scripted": data.get("judge_backend") == "scripted"})
     return sorted(out, key=lambda r: -r["mtime"])
 
@@ -269,13 +278,17 @@ def load_report(output_dir: Path, name: str) -> dict | None:
         c["file_url"] = url_for(c.get("file"))
         c["raw_url"] = url_for(c.get("raw_file"))
         c["poster_url"] = url_for(c.get("poster"))
+    for m in rep.get("moments", []) or []:
+        m["file_url"] = url_for(m.get("file"))
+        m["poster_url"] = url_for(m.get("poster"))
     rep["dir"] = name
     rep["md_url"] = f"/files/{name}/report.md" if (d / "report.md").exists() else None
     return rep
 
 
-def make_handler(scanner: Scanner, output_dir: Path, token: str, port: int):
+def make_handler(scanner: Scanner, output_dir: Path, token: str, port: int, default_mode: str = "great"):
     index_html = (WEB_DIR / "index.html").read_text(encoding="utf-8").replace("__CLIP_SCANNER_TOKEN__", token)
+    index_html = index_html.replace("__CLIP_SCANNER_MODE__", default_mode)
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
     class Handler(BaseHTTPRequestHandler):
@@ -347,7 +360,8 @@ def make_handler(scanner: Scanner, output_dir: Path, token: str, port: int):
                 max_clips = body.get("max_clips")
                 max_clips = int(max_clips) if isinstance(max_clips, (int, float, str)) and str(max_clips).isdigit() \
                     and int(max_clips) >= 1 else None
-                jobs = scanner.add(sources, max_clips, bool(body.get("cut", True)))
+                mode = body.get("mode") if body.get("mode") in MODES else None
+                jobs = scanner.add(sources, max_clips, bool(body.get("cut", True)), mode)
                 return self._json({"jobs": [j.to_json() for j in jobs]})
             m = re.fullmatch(r"/api/jobs/([0-9a-f]+)/(approve|cancel)", path)
             if m:
@@ -436,7 +450,8 @@ def serve(config_path: str | None = None, port: int = 8765, open_browser: bool =
     httpd = None
     for p in range(port, port + 20):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", p), make_handler(scanner, output_dir, token, p))
+            httpd = ThreadingHTTPServer(("127.0.0.1", p), make_handler(scanner, output_dir, token, p,
+                                                                       cfg.general.mode))
             break
         except OSError:
             continue
@@ -461,8 +476,9 @@ def run_ui(argv: list[str]) -> int:
     args = p.parse_args(argv)
     httpd, url = serve(args.config, args.port, not args.no_browser, args.judge_backend, args.scripted_judge)
     console.print(f"[bold green]clip-scanner UI running at {url}[/bold green]  (Ctrl-C to stop)")
-    backend = resolve_backend(load_config(args.config), args.judge_backend)
-    console.print(f"Judging runs on {BACKEND_LABEL.get(backend, backend)}.")
+    cfg = load_config(args.config)
+    backend = resolve_backend(cfg, args.judge_backend)
+    console.print(f"Default mode: {cfg.general.mode}. Claude calls run on {BACKEND_LABEL.get(backend, backend)}.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

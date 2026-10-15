@@ -1,10 +1,14 @@
 # clip-scanner
 
-Scans one long-form Joe Bartolozzi video (YouTube or TikTok URL, or a local file) and returns **only the
-GREAT short-form clips**. Those are the moments worth editing and posting to a clipping account on TikTok,
-YouTube Shorts and Reels.
+Scans one long-form Joe Bartolozzi video (YouTube or TikTok URL, or a local file) for short-form clips for a
+clipping account on TikTok, YouTube Shorts and Reels. It has two modes:
 
-It is built to be ruthless. A mediocre clip you waste time posting costs more than a good one it
+- **Top moments** (the default): always returns the **3 moments viewers care most about**, each as a **raw
+  1-3 minute landscape clip** of the original footage for you to edit. See [Top moments](#top-moments-the-default).
+- **Great** (`--mode great`, or pick it in the web UI): returns **only the GREAT short-form clips**, cut
+  vertical and captioned, or none. The rest of this section describes this mode.
+
+Great mode is built to be ruthless. A mediocre clip you waste time posting costs more than a good one it
 misses, so every uncertain path ends in **reject**. **"NO GREAT CLIPS" is a normal, expected
 answer.** You still get the three closest near-misses and exactly what killed each one.
 
@@ -68,6 +72,34 @@ Linux also needs `apt install ffmpeg libegl1 libgles2` (MediaPipe's native libra
 Optional speaker diarization: `uv sync --extra diarize` plus a Hugging Face token in `HF_TOKEN` that
 has the pyannote models accepted. Set `[diarization] enabled = true`.
 
+## Top moments (the default)
+
+Each scan returns the best 3 moments (`[top] count`, or the number box in the web UI), each as an untouched
+landscape clip of about 1-3 minutes, with the build-up before the moment and the reaction after it. You do
+the editing. How the moments are found:
+
+1. **YouTube's "Most replayed" graph**, when the video has one: the part of the progress bar that shows where
+   viewers rewound and rewatched. Where people rewatch is the best evidence of what they found worth
+   clipping, so it leads. The first ~45 s (people pressing play or skipping the intro) and the end card are
+   weighed down. New or low-view videos, TikTok links and local files have no graph.
+2. **The scanner's own signals**: laughter, screams, loudness spikes and reaction words. With no replay graph,
+   Claude also reads the transcript for moments (the same pass great mode uses; cached).
+3. The best-scoring non-overlapping regions (8 by default) go to **Claude in one call**, which reads each one's
+   transcript and replay numbers and picks the best 3, best first, skipping sponsor reads, the intro and the
+   outro. For each it writes a label, what happens, the second the moment peaks, and a suggested on-screen text
+   hook, and it may move the clip's edges by up to 30 s so the setup and reaction fit. If that call can't run
+   (plan limit, no login), you still get 3 moments in measured order and a note.
+
+Output: `./clip-scanner-output/<title>-<id>-top/` with `report.md` / `report.json` and
+`clips/01-<label>-12m03s.mp4` (the number is where the clip starts in the video). The report and the web UI
+give each moment's window, where it peaks inside the clip, why it was picked, and a link that opens the
+source video at that time. Clip edges land between sentences, never inside a word. Great-mode results for
+the same video stay in their own folder.
+
+Tune it in `config.toml` under `[top]`: `count`, `min_len_s` / `max_len_s` (60 / 180), `lead_s` / `tail_s`
+(build-up and aftermath kept around the moment), `candidates` (regions Claude compares), `use_claude`.
+Set `[general] mode = "great"` to make great mode the default again.
+
 ## Web UI (easiest)
 
 Double-click **Open Clip Scanner.command** in this folder (Finder). It pulls the latest version and opens
@@ -78,8 +110,11 @@ uv run clip-scanner ui
 ```
 
 This opens `http://127.0.0.1:8765` in your browser. Paste or drop one or more YouTube/TikTok links (or the
-full path of a local video) and press **Scan**. Each scan shows its stages live (Ingest → Transcribe → Signals
-→ Candidates → Keyframes → Judging → Export). On your Claude subscription it just runs. With the paid API
+full path of a local video), pick the mode (**Top moments** is preselected) and press **Scan**. Each scan shows
+its stages live (top mode: Ingest → Transcribe → Signals → Moments → Ranking → Export; great mode: Ingest →
+Transcribe → Signals → Candidates → Keyframes → Judging → Export). Top mode shows each moment as a playable
+landscape clip with its label, what happens, where it peaks, the suggested text hook (copy button), a download
+button and a link to that point in the source video. The rest of this paragraph is about great mode. On your Claude subscription it just runs. With the paid API
 backend, if the cost estimate is above your limit (`confirm_above_usd`), the scan pauses for you to click
 **Approve & judge** or **Cancel**. When it finishes
 you get the verdict, playable vertical clips, one-click copy for the caption, posting hook and hashtags,
@@ -94,9 +129,11 @@ can't start scans, because every request needs a per-launch token.
 ## Usage
 
 ```bash
-uv run clip-scanner <youtube/tiktok URL or file> [--max-clips 5] [--no-cut] [--explain-rejects]
+uv run clip-scanner <youtube/tiktok URL or file> [--mode top|great] [--max-clips N] [--no-cut] [--explain-rejects]
 
-uv run clip-scanner "https://www.youtube.com/watch?v=…"            # full scan + exports
+uv run clip-scanner "https://www.youtube.com/watch?v=…"            # top 3 moments as raw 1-3 min clips
+uv run clip-scanner URL --max-clips 5                                # top 5 moments instead
+uv run clip-scanner URL --mode great                                 # only GREAT vertical clips (or none)
 uv run clip-scanner ~/Downloads/stream.mp4 --no-cut                  # report only
 uv run clip-scanner URL --explain-rejects                            # list every rejected candidate + reason
 uv run clip-scanner URL --dry-run                                    # stop at the usage/cost estimate
@@ -109,7 +146,7 @@ Every stage is cached per video under `~/.cache/clip-scanner/<video-id>/`. Re-ru
 video skips download, transcription, signals and any judge call it has already made. Changing a
 threshold in `config.toml` re-applies the rule to the cached verdicts without calling Claude again.
 
-### Output
+### Output (great mode)
 
 `./clip-scanner-output/<title>-<id>/`
 

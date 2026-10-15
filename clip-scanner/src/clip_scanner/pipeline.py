@@ -46,10 +46,9 @@ def make_llm(cfg: Config, ws: Workspace, tracker: CostTracker, judge_backend: st
     return llm
 
 
-def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_backend: str | None = None,
-            scripted_judge: str | None = None, single_window: bool = False, quiet: bool = False,
-            on_ingested=None) -> Analysis:
-    """Stages 1-4 (+ keyframes). `single_window` treats the whole file as one candidate (calibration).
+def front_stages(source: str, cfg: Config, *, rerun: set[str] = frozenset(), quiet: bool = False,
+                 on_ingested=None) -> tuple[VideoMeta, Workspace, Transcript, Signals, str]:
+    """Ingest, transcribe, signals (shared by both modes). Returns (meta, ws, transcript, signals, signals_fp).
     `on_ingested(meta)` runs as soon as the video is identified, before any slow stage."""
     out = console if not quiet else None
     with stage("Ingest") as st:
@@ -70,6 +69,16 @@ def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_ba
         st["cached"] = before == s_fp and "signals" not in rerun
         st["note"] = (f"{len(signals.scene_cuts)} scene cuts · audio events "
                       f"{'on' if signals.events_available else 'off'}")
+    return meta, ws, transcript, signals, s_fp
+
+
+def analyze(source: str, cfg: Config, *, rerun: set[str] = frozenset(), judge_backend: str | None = None,
+            scripted_judge: str | None = None, single_window: bool = False, quiet: bool = False,
+            on_ingested=None) -> Analysis:
+    """Stages 1-4 (+ keyframes). `single_window` treats the whole file as one candidate (calibration)."""
+    out = console if not quiet else None
+    meta, ws, transcript, signals, s_fp = front_stages(source, cfg, rerun=rerun, quiet=quiet,
+                                                       on_ingested=on_ingested)
     tracker = CostTracker(cfg)
     llm = make_llm(cfg, ws, tracker, judge_backend, scripted_judge, refresh="judging" in rerun)
     recall_complete = True
@@ -124,6 +133,10 @@ def run_scan(args: argparse.Namespace, confirm) -> dict:
     from .report import out_dir_for, print_report, write_in_progress, write_reports
 
     cfg = load_config(args.config)
+    if (getattr(args, "mode", None) or cfg.general.mode) == "top":
+        from .top_run import run_top
+
+        return run_top(args, cfg, confirm)
     max_clips = args.max_clips or cfg.general.max_clips
     backend = resolve_backend(cfg, args.judge_backend)
     scripted = backend == "scripted"

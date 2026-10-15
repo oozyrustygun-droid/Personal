@@ -147,10 +147,16 @@ def raw_window(a, cand, cfg: Config) -> tuple[float, float]:
 def render_raw(a, cand, out_path: Path, cfg: Config) -> Path:
     """Untouched original framing and audio, no captions: footage for re-editing by hand."""
     s, e = raw_window(a, cand, cfg)
+    return render_span(a.meta.path, s, e, out_path, cfg)
+
+
+def render_span(src: Path, s: float, e: float, out_path: Path, cfg: Config) -> Path:
+    """Source seconds s..e re-encoded frame-accurately in the original framing (no crop, no captions)."""
+    require_binary("ffmpeg")
     tmp = out_path.with_suffix(".tmp.mp4")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     p = subprocess.run(["ffmpeg", "-y", "-v", "error", *hwaccel_args(cfg.signals.hwaccel), "-ss", f"{s:.3f}",
-                        "-t", f"{e - s:.3f}", "-i", str(a.meta.path), "-map", "0:v:0", "-map", "0:a:0",
+                        "-t", f"{e - s:.3f}", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(cfg.export.crf), "-pix_fmt", "yuv420p",
                         "-c:a", "aac", "-b:a", cfg.export.audio_bitrate, "-movflags", "+faststart", str(tmp)],
                        capture_output=True)

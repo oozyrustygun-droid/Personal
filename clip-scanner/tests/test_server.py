@@ -77,7 +77,8 @@ def test_page_and_auth(server):
 
 def test_scan_with_approval_and_results(server):
     base, token = server["base"], server["token"]
-    status, _, body = req(base, "/api/jobs", "POST", {"text": str(FIX), "max_clips": 3, "cut": True}, token=token)
+    status, _, body = req(base, "/api/jobs", "POST", {"text": str(FIX), "max_clips": 3, "cut": True, "mode": "great"},
+                          token=token)
     assert status == 200
     job_id = json.loads(body)["jobs"][0]["id"]
     job = wait_for(base, lambda j: j["status"] in ("awaiting_approval", "failed", "done"))
@@ -112,13 +113,37 @@ def test_cancel_at_approval(server):
     base, token = server["base"], server["token"]
     other = server["tmp"] / "other.mp4"  # different content hash -> fresh workspace, uncached judging
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(FIX), "-t", "39", "-c", "copy", str(other)], check=True)
-    job_id = json.loads(req(base, "/api/jobs", "POST", {"text": str(other)}, token=token)[2])["jobs"][0]["id"]
+    job_id = json.loads(req(base, "/api/jobs", "POST", {"text": str(other), "mode": "great"},
+                            token=token)[2])["jobs"][0]["id"]
     job = wait_for(base, lambda j: j["id"] == job_id and j["status"] in ("awaiting_approval", "done", "failed"))
     assert job["status"] == "awaiting_approval", job["log"][-10:]
     assert req(base, f"/api/jobs/{job_id}/cancel", "POST", token=token)[0] == 200
     job = wait_for(base, lambda j: j["id"] == job_id and j["finished"])
     assert job["status"] == "cancelled" and job["result_status"] == "unavailable"
     assert job["judging"]["done"] == 0  # nothing was judged
+
+
+def test_top_mode_scan(server):
+    """The default mode: no approval step, the best moments as raw landscape clips, served to the page."""
+    base, token = server["base"], server["token"]
+    status, _, body = req(base, "/api/jobs", "POST", {"text": str(FIX), "cut": True}, token=token)  # config default
+    assert status == 200
+    job = json.loads(body)["jobs"][0]
+    assert job["mode"] == "top"
+    assert [s["name"] for s in job["stages"]] == ["Ingest", "Transcribe", "Signals", "Moments", "Ranking", "Export"]
+    job = wait_for(base, lambda j: j["id"] == job["id"] and j["status"] in ("done", "failed", "awaiting_approval"))
+    assert job["status"] == "done", job.get("error") or job["log"][-15:]
+    assert job["report_dir"].endswith("-top-SCRIPTED-TEST") and job["result_status"] == "complete"
+    assert all(s["state"] in ("done", "cached") for s in job["stages"]), job["stages"]
+    reports = {r["dir"]: r for r in json.loads(req(base, "/api/reports")[2])["reports"]}
+    assert reports[job["report_dir"]]["mode"] == "top" and reports[job["report_dir"]]["great"] == 1
+    rep = json.loads(req(base, f"/api/reports/{job['report_dir']}")[2])
+    m = rep["moments"][0]
+    assert rep["mode"] == "top" and m["file_url"] and m["poster_url"]
+    status, headers, data = req(base, m["file_url"], headers={"Range": "bytes=0-99"})
+    assert status == 206 and len(data) == 100
+    page = req(base, "/")[2]
+    assert b'DEFAULT_MODE = "top"' in page
 
 
 def test_friendly_errors():

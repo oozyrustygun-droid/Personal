@@ -488,11 +488,30 @@ def _describe(sig: Signals, segments, peak: float) -> str:
     return "signal peak: " + (", ".join(bits) if bits else "interest peak")
 
 
+def candidates_fp(cfg: Config, signals_fp: str, llm=None) -> str:
+    use_llm = cfg.candidates.llm_proposer and llm is not None
+    return fingerprint("candidates", CANDIDATES_VERSION, cfg.section_hash("candidates", "gates"), signals_fp,
+                       use_llm and cfg.candidates.proposer_model, use_llm and llm.backend, cfg.export.preroll_s)
+
+
+def cached_proposals(ws: Workspace, signals_fp: str, cfg: Config, llm=None) -> list | None:
+    """The transcript proposer's moments from a finished candidates stage on the same transcript and
+    signals (free to reuse), or None."""
+    from .proposer import Moment
+
+    out = ws.path("candidates.json")
+    if not ws.is_done("candidates", candidates_fp(cfg, signals_fp, llm), [out]):
+        return None
+    try:
+        return [Moment.model_validate(d) for d in read_json(out).get("proposals", [])]
+    except (OSError, ValueError):
+        return None
+
+
 def candidates_stage(ws: Workspace, transcript: Transcript, sig: Signals, signals_fp: str, duration: float,
                      cfg: Config, llm=None, *, console=None, force: bool = False) -> tuple[list[Candidate], str]:
     use_llm = cfg.candidates.llm_proposer and llm is not None
-    fp = fingerprint("candidates", CANDIDATES_VERSION, cfg.section_hash("candidates", "gates"), signals_fp,
-                     use_llm and cfg.candidates.proposer_model, use_llm and llm.backend, cfg.export.preroll_s)
+    fp = candidates_fp(cfg, signals_fp, llm)
     out = ws.path("candidates.json")
     if not force and ws.is_done("candidates", fp, [out]):
         cached = read_json(out)

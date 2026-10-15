@@ -1,6 +1,6 @@
 """`clip-scanner` entry point.
 
-    clip-scanner <url-or-file> [--max-clips 5] [--no-cut] [--explain-rejects]
+    clip-scanner <url-or-file> [--mode top|great] [--max-clips N] [--no-cut] [--explain-rejects]
     clip-scanner calibrate [--manifest calibration/manifest.toml] [--fetch] [--write-config]
     clip-scanner doctor
     clip-scanner ui            # local web front end (paste/drop links, review clips)
@@ -35,17 +35,23 @@ def _common(p: argparse.ArgumentParser) -> None:
 def scan_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="clip-scanner",
-        description="Find only the GREAT short-form clips in a long-form video. "
-                    "Zero clips is a valid, expected answer.",
+        description="Find short-form clips in a long-form video. Top mode (default): the N moments viewers "
+                    "care most about, each as a raw 1-3 minute landscape clip for you to edit. Great mode: only "
+                    "clips a judging panel rates GREAT, cut vertical and captioned (zero is a valid answer).",
         epilog="Other commands: `clip-scanner ui` (web front end), `clip-scanner calibrate --help`, "
                "`clip-scanner doctor`.",
     )
     p.add_argument("source", help="YouTube/TikTok URL or a local video file")
+    p.add_argument("--mode", choices=["top", "great"], default=None,
+                   help="top = the best N moments as raw 1-3 min clips; great = only GREAT vertical clips "
+                        "(default from config.toml: general.mode)")
     p.add_argument("--max-clips", type=_positive_int, default=None,
-                   help="cap on GREAT clips returned (default from config: 5); never fills with non-GREAT")
-    p.add_argument("--no-cut", action="store_true", help="report only; do not export vertical MP4s")
+                   help="top mode: how many moments (default 3, top.count); great mode: cap on GREAT clips "
+                        "(default 5, general.max_clips), never filled with non-GREAT")
+    p.add_argument("--no-cut", action="store_true", help="report only; do not export MP4s")
     p.add_argument("--explain-rejects", action="store_true", help="list every rejected candidate with its reason")
-    p.add_argument("--dry-run", action="store_true", help="stop after candidate generation and show the cost estimate")
+    p.add_argument("--dry-run", action="store_true",
+                   help="stop before any judging/ranking call (great mode: show the cost estimate)")
     p.add_argument("--rerun", nargs="+", default=[], metavar="STAGE",
                    choices=["ingest", "transcribe", "signals", "candidates", "judging", "export"],
                    help="force these stages to run again")

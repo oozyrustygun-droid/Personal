@@ -23,20 +23,21 @@ STAGE_LABEL = {"deterministic_gates": "hard gate (measured)", "panel": "judging 
 SCRIPTED_BANNER = "SCRIPTED TEST JUDGE, NOT REAL JUDGING"
 
 
-def out_dir_for(meta, cfg: Config, scripted: bool = False) -> Path:
+def out_dir_for(meta, cfg: Config, scripted: bool = False, mode: str = "great") -> Path:
     from .export import slug
 
-    # Offline test runs never write into the real output folder.
-    suffix = "-SCRIPTED-TEST" if scripted else ""
+    # Offline test runs never write into the real output folder; the two modes keep separate results.
+    suffix = ("-top" if mode == "top" else "") + ("-SCRIPTED-TEST" if scripted else "")
     return cfg.output_dir / f"{slug(meta.title, 50)}-{meta.video_id[-10:]}{suffix}"
 
 
-def write_in_progress(meta, cfg: Config, out: Path, scripted: bool = False, backend: str = "") -> None:
+def write_in_progress(meta, cfg: Config, out: Path, scripted: bool = False, backend: str = "",
+                      mode: str = "great") -> None:
     """Placeholder written before judging, so an interrupted run never leaves an old verdict looking current."""
     out.mkdir(parents=True, exist_ok=True)
     msg = ("IN PROGRESS: a scan of this video started and has not finished. If you are reading this, it "
            "was interrupted or crashed; earlier results are invalid until a run completes.")
-    write_json(out / "report.json", {"status": "in_progress", "verdict": "IN PROGRESS / INTERRUPTED",
+    write_json(out / "report.json", {"status": "in_progress", "verdict": "IN PROGRESS / INTERRUPTED", "mode": mode,
                                      "video": {"id": meta.video_id, "title": meta.title},
                                      "judge_backend": "scripted" if scripted else backend,
                                      "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
@@ -271,6 +272,112 @@ def print_report(a, result, cfg: Config, paths: dict, *, explain_rejects: bool =
         for r in rep["rejected"]:
             t.add_row(r["id"], f"{r['start_ts']}–{r['end_ts']}", f"{r['duration']:.1f}s",
                       STAGE_LABEL.get(r["killed_at"], r["killed_at"]), "; ".join(r["reasons"]))
+        console.print(t)
+    console.print(cost_line(rep["cost"]))
+    console.print(f"[dim]report: {paths['md']}\njson:   {paths['json']}[/dim]")
+
+
+# ---- top-moments mode ------------------------------------------------------------------------------
+
+def _moment_json(m, exported: dict, url: str | None) -> dict:
+    r = m.region
+    info = exported.get(m.rank) or {}
+    return {
+        "rank": m.rank, "start": round(m.start, 2), "end": round(m.end, 2), "start_ts": fmt_ts(m.start),
+        "end_ts": fmt_ts(m.end), "duration": round(m.duration, 2), "focus": round(m.focus, 2),
+        "focus_ts": fmt_ts(m.focus), "focus_in_clip": round(m.focus - m.start, 1), "title": m.title, "why": m.why,
+        "text_hook": m.text_hook, "replay_peak": r.replay_peak, "replay_mean": r.replay_mean,
+        "sources": r.sources, "transcript_flags": r.flags, "measured_peak": round(r.peak, 2),
+        "measured_score": round(r.score, 3), "file": info.get("file"), "poster": info.get("poster"),
+        "url_at_start": f"{url}{'&' if '?' in url else '?'}t={int(m.start)}s" if url and "youtu" in url else None,
+    }
+
+
+def build_top_report(meta, transcript, sig, result, cfg: Config, exported: dict, tracker, llm,
+                     scripted: bool = False) -> dict:
+    n = len(result.moments)
+    base = f"TOP {n} MOMENT{'S' if n != 1 else ''}" if n else "NO MOMENTS FOUND"
+    partial = result.method != "claude" and cfg.top.use_claude
+    return {
+        "tool": f"clip-scanner {build_id()}",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "mode": "top",
+        "video": {"id": meta.video_id, "title": meta.title, "source": meta.source, "url": meta.url,
+                  "uploader": meta.uploader, "duration": round(meta.duration, 1)},
+        "verdict": f"[{SCRIPTED_BANNER}] {base}" if scripted else base,
+        "status": "partial" if partial or result.recall_incomplete else "complete",
+        "judge_backend": "scripted" if scripted else llm.backend,
+        "ranking": {"method": result.method, "model": cfg.judging.model if result.method == "claude" else None,
+                    "served_model": result.served_model or None, "most_replayed": result.has_heat,
+                    "regions_considered": len(result.regions), "asked_for": cfg.top.count},
+        "moments": [_moment_json(m, exported, meta.url) for m in result.moments],
+        "regions": [{"start": round(r.start, 2), "end": round(r.end, 2), "peak": round(r.peak, 2),
+                     "score": round(r.score, 3), "replay_peak": r.replay_peak, "sources": r.sources}
+                    for r in result.regions],
+        "transcript": {"backend": transcript.backend, "model": transcript.model, "words": len(transcript.words)},
+        "signals_notes": sig.notes,
+        "notes": result.notes,
+        "cost": tracker.summary(),
+    }
+
+
+def render_top_markdown(rep: dict) -> str:
+    v = rep["video"]
+    rk = rep["ranking"]
+    how = (f"Claude ({rk['model']}) picked them from {rk['regions_considered']} measured regions"
+           if rk["method"] == "claude" else f"ranked by measured signals ({rk['regions_considered']} regions)")
+    L = [f"# clip-scanner report: {v['title']}", "",
+         f"- Source: {v['url'] or v['source']}",
+         f"- Duration: {fmt_ts(v['duration'])} · transcript: {rep['transcript']['backend']}/"
+         f"{rep['transcript']['model']}",
+         f"- Mode: top moments, raw landscape clips for you to edit · {how} · YouTube \"Most replayed\" "
+         f"{'used' if rk['most_replayed'] else 'not available'}",
+         f"- Generated {rep['generated_at']} by {rep['tool']}", "",
+         f"## {rep['verdict']}", ""]
+    if rep.get("judge_backend") == "scripted":
+        L += [f"> 🧪 **{SCRIPTED_BANNER}.** The ranking comes from the offline test script, not Claude.", ""]
+    for n in rep["notes"] + rep["signals_notes"]:
+        L += [f"> ⚠️ {n}", ""]
+    for m in rep["moments"]:
+        replay = f"most replayed peak {m['replay_peak']:.2f}" if m["replay_peak"] is not None else ""
+        why = ", ".join(x for x in [replay] + [s for s in m["sources"] if s != "most replayed"] if x)
+        L += [f"### #{m['rank']}: {m['title']}", "",
+              f"- **Window:** {m['start_ts']} → {m['end_ts']} ({m['duration']:.0f}s)"
+              + (f" · [open on YouTube]({m['url_at_start']})" if m.get("url_at_start") else ""),
+              f"- **Peak:** {m['focus_ts']} ({m['focus_in_clip']:.0f}s into the clip)",
+              f"- **What happens:** {m['why']}",
+              *([f"- **Suggested text hook:** {m['text_hook']}"] if m["text_hook"] else []),
+              f"- **Signals:** {why or 'interest peak'}",
+              f"- **File (raw landscape):** {m['file'] or '(not exported)'}", ""]
+    L += ["## Cost", "", cost_line(rep["cost"], markdown=True), ""]
+    return "\n".join(L) + "\n"
+
+
+def write_top_reports(meta, transcript, sig, result, cfg: Config, out: Path, exported: dict, tracker, llm,
+                      scripted: bool = False) -> dict:
+    out.mkdir(parents=True, exist_ok=True)
+    rep = build_top_report(meta, transcript, sig, result, cfg, exported, tracker, llm, scripted)
+    write_json(out / "report.json", rep)
+    (out / "report.md").write_text(render_top_markdown(rep), encoding="utf-8")
+    return {"dir": out, "md": out / "report.md", "json": out / "report.json", "report": rep}
+
+
+def print_top_report(meta, paths: dict) -> None:
+    rep = paths["report"]
+    console.print()
+    console.print(Panel(f"[bold]{rep['verdict']}[/bold]", title=f"clip-scanner · {meta.title[:60]}",
+                        border_style="green" if rep["moments"] else "red"))
+    for n in rep["notes"]:
+        console.print(f"[yellow]⚠ {n}[/yellow]")
+    if rep["moments"]:
+        t = Table(show_lines=True)
+        for col in ("#", "Window", "Len", "Peak", "Moment"):
+            t.add_column(col, overflow="fold")
+        for m in rep["moments"]:
+            t.add_row(str(m["rank"]), f"{m['start_ts']}–{m['end_ts']}", f"{m['duration']:.0f}s", m["focus_ts"],
+                      f"[bold]{m['title']}[/bold]\n{m['why']}"
+                      + (f"\nText hook: {m['text_hook']}" if m["text_hook"] else "")
+                      + (f"\n[dim]{m['file']}[/dim]" if m["file"] else ""))
         console.print(t)
     console.print(cost_line(rep["cost"]))
     console.print(f"[dim]report: {paths['md']}\njson:   {paths['json']}[/dim]")

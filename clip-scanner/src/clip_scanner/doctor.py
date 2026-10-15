@@ -69,6 +69,10 @@ def run_doctor(argv: list[str]) -> int:
         cfg = None
     backend = resolve_backend(cfg, None) if cfg else "claude-code"
     console.print(f"  [dim]judging backend: {BACKEND_LABEL.get(backend, backend)}[/dim]")
+    if cfg:
+        mode = (f"top moments ({cfg.top.count} raw clips of {cfg.top.min_len_s:.0f}-{cfg.top.max_len_s:.0f} s)"
+                if cfg.general.mode == "top" else "great (only GREAT vertical clips)")
+        console.print(f"  [dim]default mode: {mode}[/dim]")
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if backend == "claude-code":
         good &= _check_claude_code(cfg)

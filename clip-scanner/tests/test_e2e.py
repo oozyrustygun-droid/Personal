@@ -40,7 +40,7 @@ def env(tmp_path_factory):
     backend, model = pick_asr()
     cfg = tmp / "config.toml"
     cfg.write_text(
-        f'[general]\ncache_dir = "{tmp / "cache"}"\noutput_dir = "{tmp / "out"}"\n'
+        f'[general]\ncache_dir = "{tmp / "cache"}"\noutput_dir = "{tmp / "out"}"\nmode = "great"\n'
         f'[transcribe]\nbackend = "{backend}"\nmodel = "{model}"\n'
         '[judging]\nconfirm_above_usd = 1000.0\ntext_hook = true\n')
     great = tmp / "great.json"

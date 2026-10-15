@@ -58,6 +58,28 @@ class GeneralCfg(_Section):
     cache_dir: str = "~/.cache/clip-scanner"
     output_dir: str = "./clip-scanner-output"
     max_clips: int = Field(5, ge=1)
+    # top: always the N most clickable moments, each as a raw 1-3 minute clip for you to edit.
+    # great: only clips the judging panel rates GREAT (vertical, captioned), or none.
+    mode: Literal["top", "great"] = "top"
+
+
+class TopCfg(_Section):
+    count: int = Field(3, ge=1, le=20)        # moments returned
+    min_len_s: float = Field(60.0, gt=0)      # each raw clip is roughly 1-3 minutes
+    max_len_s: float = Field(180.0, gt=0)
+    lead_s: float = Field(35.0, ge=0)         # build-up kept before the moment
+    tail_s: float = Field(25.0, ge=0)         # aftermath kept after it
+    min_gap_s: float = Field(20.0, ge=0)      # space between two moments
+    candidates: int = Field(8, ge=1, le=20)   # regions Claude compares to pick the best `count`
+    skip_intro_s: float = Field(45.0, ge=0)   # "most replayed" spikes here are mostly people pressing play
+    use_claude: bool = True                   # rank with one Claude call (else by measured signals only)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+
+    @model_validator(mode="after")
+    def _check(self) -> "TopCfg":
+        if self.min_len_s > self.max_len_s:
+            raise ValueError("top.min_len_s must be <= top.max_len_s")
+        return self
 
 
 class IngestCfg(_Section):
@@ -280,6 +302,7 @@ DEFAULT_PRICING = {
 
 class Config(_Section):
     general: GeneralCfg = GeneralCfg()
+    top: TopCfg = TopCfg()
     ingest: IngestCfg = IngestCfg()
     transcribe: TranscribeCfg = TranscribeCfg()
     diarization: DiarizationCfg = DiarizationCfg()

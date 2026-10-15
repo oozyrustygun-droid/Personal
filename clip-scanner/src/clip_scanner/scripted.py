@@ -83,6 +83,18 @@ def make_script(rules: dict) -> ScriptFn:
             return {"one_line_read": "scripted: no candidate cleared the bar"}
         if purpose == "proposer":
             return {"moments": rules.get("proposals", [])}
+        if purpose == "top_rank":
+            # Measured order, or the region numbers in rules["top_order"]; each keeps its own edges.
+            regions = meta.get("regions", [])
+            order = rules.get("top_order") or list(range(1, len(regions) + 1))
+            picks = []
+            for k in order[: meta.get("count", 3)]:
+                s, e, peak = regions[k - 1]
+                words = meta.get("texts", [""] * len(regions))[k - 1].split()
+                picks.append({"region": k, "title": " ".join(words[:5]) or f"Region {k}",
+                              "why": "scripted ranking", "focus_s": peak, "start_s": s, "end_s": e,
+                              "text_hook": " ".join(words[:6])})
+            return {"picks": picks}
         raise ValueError(f"scripted backend has no rule for purpose {purpose!r}")
 
     script.fingerprint = json.dumps(rules, sort_keys=True)  # part of the response-cache key
