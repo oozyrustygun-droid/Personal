@@ -308,3 +308,43 @@ def test_window_never_ends_on_silence():
     assert tighten(10.0, 30.0, [(28.5, 30.0)], 1.5, 0.35) == [(10.0, 28.675)]
     # short breathing room at the end is kept
     assert tighten(10.0, 30.0, [(29.8, 30.0)], 1.5, 0.35) == [(10.0, 30.0)]
+
+
+def test_reaction_right_after_the_line_before_skips_its_last_word():
+    words = [Word(8.95, 9.6, "on"), Word(9.65, 10.0, "Tumblr.")]       # scream onset 0.2 s later, wordless
+    t = hook_first_start(10.8, words, [], 1.6, None, onset=10.2)
+    assert 10.0 <= t <= 10.2
+    words2 = [Word(8.95, 9.5, "on"), Word(9.75, 10.1, "Tumblr.")]      # dramatic pause before the last word
+    t2 = hook_first_start(10.9, words2, [], 1.6, None, onset=10.3)
+    assert 10.1 <= t2 <= 10.3
+
+
+def test_reaction_first_start_is_never_after_the_peak():
+    from clip_scanner.boundaries import split_sentences
+
+    words = [Word(18.0, 18.6, "okay."), Word(20.2, 20.6, "WHAT")]      # bang at 20.0, "WHAT" right after
+    t = hook_first_start(20.0, words, [], 1.6, split_sentences(words, 0.7), onset=20.0)
+    assert t <= 20.0
+
+
+def test_long_build_up_still_opens_on_a_phrase_start():
+    words = [Word(9.0, 9.3, "he"), Word(9.35, 9.6, "said"), Word(10.0, 10.3, "no"), Word(10.35, 10.6, "way"),
+             Word(10.65, 10.9, "dude")]
+    # onset far before the peak (a slow build): open on the earliest phrase start in the hook window
+    t = hook_first_start(11.5, words, [], 1.6, None, onset=5.0)
+    assert abs(t - (10.0 - 0.08)) < 1e-6
+
+
+def test_silent_ending_is_trimmed_even_off_the_hop_grid():
+    import numpy as np
+
+    from clip_scanner.candidates import dead_runs
+
+    tr, sig = synthetic(peaks=(), dead=((28.5, 40.0),))
+    runs = dead_runs(sig, 10.0, 30.04)
+    assert runs and runs[-1][1] == 30.04                                # closes at the clip's end
+    from clip_scanner.boundaries import tighten
+
+    segs = tighten(10.0, 30.04, runs, 1.5, 0.35)
+    assert segs[-1][1] < 29.2
+    assert np.isclose(tighten(10.0, 30.0, [(29.6, 30.0)], 1.5, 0.35)[-1][1], 30.0)  # normal tail kept

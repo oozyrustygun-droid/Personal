@@ -31,7 +31,7 @@ from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 11
+CANDIDATES_VERSION = 12
 
 
 @dataclass
@@ -181,7 +181,8 @@ def dead_runs(sig: Signals, start: float, end: float) -> list[tuple[float, float
         if d and s is None:
             s = i
         elif not d and s is not None:
-            runs.append((s * sig.hop, i * sig.hop))
+            # a run still open at the last hop runs to the clip's end, not to the rounded hop
+            runs.append((s * sig.hop, end if i == i1 else i * sig.hop))
             s = None
     return runs
 
@@ -223,20 +224,28 @@ def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: 
          moved out of any word (after the word when the reaction starts after it, so the clip doesn't
          open on the last word of someone else's line).
     Never inside a word."""
+    clamped = onset is not None and onset < peak - back_s  # a long build-up: search the whole window
     t0 = peak if onset is None else min(peak, max(onset, peak - back_s))
     starts = [w.start for w in words]
-    near = list(range(bisect.bisect_left(starts, max(peak - back_s, t0 - 0.6)),
-                      bisect.bisect_right(starts, min(peak, t0 + 0.3))))
+    lo_t = peak - back_s if clamped else max(peak - back_s, t0 - 0.6)
+    near = list(range(bisect.bisect_left(starts, lo_t), bisect.bisect_right(starts, peak if clamped else min(peak, t0 + 0.3))))
+    # The reaction starts in a pause after someone's line: that line's words are not part of the moment.
+    j = bisect.bisect_right(starts, t0) - 1
+    line_end = 0.0
+    if j >= 0 and words[j].end <= t0 - 0.1 and (j + 1 == len(words) or words[j + 1].start - words[j].end >= 0.25):
+        near = [k for k in near if k > j]
+        line_end = words[j].end
     phrase = [k for k in near if gap_before(words, k) >= 0.25]
     if phrase:
-        return start_point(words, phrase[-1], cuts)
+        return start_point(words, phrase[0] if clamped else phrase[-1], cuts)
     if sentences is not None:
         own = next((s for s in sentences if s.end >= t0 - 0.1), None)
-        if own is not None and peak - back_s <= own.start <= t0 + 0.3:
+        if own is not None and peak - back_s <= own.start <= min(peak, t0 + 0.3) and own.start >= line_end:
             return start_point(words, own.i0, cuts)
     if near:
         return start_point(words, near[0], cuts)
-    cut = next((float(c) for c in cuts if t0 - 0.6 <= c <= t0 and not straddles(words, float(c))), None)
+    cut = next((float(c) for c in cuts if max(t0 - 0.6, line_end) <= c <= t0 and not straddles(words, float(c))),
+               None)
     if cut is not None:  # open on the new shot rather than a flash of the previous one
         return cut
     t = max(0.0, t0 - min(0.3, back_s))
