@@ -31,7 +31,7 @@ from .config import Config
 from .signals import Signals
 from .transcribe import Transcript, Word
 
-CANDIDATES_VERSION = 10
+CANDIDATES_VERSION = 11
 
 
 @dataclass
@@ -210,25 +210,41 @@ def heuristic_score(sig: Signals, segments: list[tuple[float, float]], peak: flo
 
 # ---- generation -----------------------------------------------------------------------------
 
-def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: float) -> float:
-    """A start that opens ON the moment, so the peak lands within `back_s` of the first frame.
-
-    Prefers the earliest phrase start (a word after a pause of >= 0.25 s) in [peak - back_s, peak], so
-    the line carrying the reaction is heard from its first word; else the earliest word start in that
-    range (on the moment, mid-phrase); else, for a wordless reaction, a scene cut just before the peak
-    or a point just before it. Never inside a word."""
+def hook_first_start(peak: float, words: list[Word], cuts: list[float], back_s: float,
+                     sentences: list | None = None, onset: float | None = None) -> float:
+    """A start that opens ON the moment: the clip starts where the reaction starts, and the peak lands
+    within `back_s` of the first frame. `onset` is where the reaction begins (the interest rise), which
+    can be well before the curve's maximum. In order of preference:
+      1. speech that begins at the reaction: the latest phrase start (a word after a pause of >= 0.25 s)
+         within ~0.6 s before to 0.3 s after the onset;
+      2. the first word of the sentence the reaction is in, if it starts close enough;
+      3. the first word starting at the reaction (mid-phrase);
+      4. for a wordless reaction (a laugh, a scream), a scene cut just before it, else ~0.3 s before it,
+         moved out of any word (after the word when the reaction starts after it, so the clip doesn't
+         open on the last word of someone else's line).
+    Never inside a word."""
+    t0 = peak if onset is None else min(peak, max(onset, peak - back_s))
     starts = [w.start for w in words]
-    lo, hi = bisect.bisect_left(starts, peak - back_s), bisect.bisect_right(starts, peak)
-    in_range = list(range(lo, hi))
-    phrase = [k for k in in_range if gap_before(words, k) >= 0.25]
-    if phrase or in_range:
-        return start_point(words, (phrase or in_range)[0], cuts)
-    t = max(0.0, peak - min(0.6, back_s))
-    cut = next((float(c) for c in cuts if t <= c <= peak and not straddles(words, float(c))), None)
+    near = list(range(bisect.bisect_left(starts, max(peak - back_s, t0 - 0.6)),
+                      bisect.bisect_right(starts, min(peak, t0 + 0.3))))
+    phrase = [k for k in near if gap_before(words, k) >= 0.25]
+    if phrase:
+        return start_point(words, phrase[-1], cuts)
+    if sentences is not None:
+        own = next((s for s in sentences if s.end >= t0 - 0.1), None)
+        if own is not None and peak - back_s <= own.start <= t0 + 0.3:
+            return start_point(words, own.i0, cuts)
+    if near:
+        return start_point(words, near[0], cuts)
+    cut = next((float(c) for c in cuts if t0 - 0.6 <= c <= t0 and not straddles(words, float(c))), None)
     if cut is not None:  # open on the new shot rather than a flash of the previous one
         return cut
+    t = max(0.0, t0 - min(0.3, back_s))
     k = bisect.bisect_right(starts, t) - 1
-    if k >= 0 and words[k].end > t:  # t falls inside a word: start before that word instead
+    if k >= 0 and words[k].end > t:  # t falls inside a word
+        nxt = words[k + 1].start if k + 1 < len(words) else float("inf")
+        if words[k].end + 0.02 <= min(t0, nxt):
+            return words[k].end + 0.02  # just after it: the word belongs to the line before the reaction
         return start_point(words, k, cuts)
     return t
 
@@ -251,12 +267,13 @@ def _hook_window(g: dict, peak: float, payoff: float, own_end: float, back: floa
     never a clip that stops just as the next reaction lands."""
     cc = cfg.candidates
     words = transcript.words
-    hs = hook_first_start(peak, words, cuts, back)
+    hs = hook_first_start(peak, words, cuts, back, sentences, onset=activity_start(sig, peak))
     if hs > peak:
         return None
     # Where each later moment begins (its reaction, or its own reaction-first opening, whichever is
     # first) and where its payoff ends. A clip may end before a moment or after it, never inside it.
-    later = [(min(activity_start(sig, p), hook_first_start(p, words, cuts, back)) - 0.2, e)
+    later = [(min(activity_start(sig, p), hook_first_start(p, words, cuts, back, sentences,
+                                                           onset=activity_start(sig, p))) - 0.2, e)
              for p, e in (g.get("later") or []) if p > peak]
     nxt = later[0] if later else None
     for L in sorted(cc.target_lens_s) or [cc.min_len_s + 2.0]:

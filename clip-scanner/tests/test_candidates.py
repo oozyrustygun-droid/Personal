@@ -248,7 +248,7 @@ def test_hook_first_start_never_cuts_a_word():
     t = hook_first_start(10.5, words, [], 0.3)
     assert abs(t - (10.35 - 0.05)) < 1e-6 and not straddles(words, t)   # 0.05 s after "so" ends
     # wordless reaction (a scream) long after the last word: just before the peak
-    assert abs(hook_first_start(20.0, words, [], 1.6) - 19.4) < 1e-6
+    assert abs(hook_first_start(20.0, words, [], 1.6) - 19.7) < 1e-6
     # target inside a long word: move to that word's start
     long_word = [Word(11.0, 11.6, "aaaah")]
     t = hook_first_start(11.5, long_word, [], 0.2)      # 11.3 would cut into "aaaah"
@@ -281,3 +281,30 @@ def test_laugh_inside_a_story_setup_keeps_the_proposers_window():
     m = Moment(start_s=80.0, end_s=102.0, payoff_s=100.0, kind="story", why="story", strength=3)
     cands = generate(tr, sig, sig.duration, cfg, [m])
     assert any(abs(c.start - 80.0) < 1.5 and c.end >= 100.0 for c in cands), [(c.start, c.end) for c in cands]
+
+
+def test_reaction_first_start_skips_the_last_word_of_the_line_before():
+    """The other video's narrator says "...Tumblr." and Joe screams right after: open on the scream."""
+    from clip_scanner.boundaries import split_sentences
+
+    words = [Word(9.0, 9.6, "on"), Word(9.65, 10.0, "Tumblr."), Word(10.7, 12.0, "STOOOOP!")]
+    sents = split_sentences(words, 0.7)
+    t = hook_first_start(11.2, words, [], 1.6, sents, onset=10.7)
+    assert 10.0 <= t <= 10.7 and not straddles(words, t)
+    # no punctuation from the transcriber, only a short pause: still the scream
+    words2 = [Word(9.0, 9.6, "on"), Word(9.65, 10.0, "tumblr"), Word(10.3, 12.0, "stooooop")]
+    t2 = hook_first_start(11.2, words2, [], 1.6, split_sentences(words2, 0.7), onset=10.3)
+    assert 10.0 <= t2 <= 10.3
+    # a wordless laugh right after the narrator's last word: start after that word, not before it
+    words3 = [Word(9.0, 9.6, "on"), Word(9.65, 10.4, "Tumblr")]
+    t3 = hook_first_start(11.0, words3, [], 1.6, split_sentences(words3, 0.7), onset=10.5)
+    assert 10.4 <= t3 <= 10.5
+
+
+def test_window_never_ends_on_silence():
+    from clip_scanner.boundaries import tighten
+
+    # 1.5 s of dead air at the end is within the dead-air limit, but the clip must not end on it
+    assert tighten(10.0, 30.0, [(28.5, 30.0)], 1.5, 0.35) == [(10.0, 28.675)]
+    # short breathing room at the end is kept
+    assert tighten(10.0, 30.0, [(29.8, 30.0)], 1.5, 0.35) == [(10.0, 30.0)]

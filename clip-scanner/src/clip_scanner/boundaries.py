@@ -168,6 +168,11 @@ def tighten(start: float, end: float, dead_runs: Sequence[tuple[float, float]], 
     Dead air touching the clip edges is trimmed off instead of being jump-cut.
     """
     runs = sorted((max(s, start), min(e, end)) for s, e in dead_runs if e > start and s < end)
+    # A clip never ends on silence: trailing dead air longer than the breathing room is trimmed whatever
+    # its length (a 1.5 s silent ending is within the dead-air limit but reads as the clip dying).
+    if runs and runs[-1][1] >= end - EPS and runs[-1][1] - runs[-1][0] > keep and runs[-1][0] > start + EPS:
+        end = runs[-1][0] + keep / 2
+        runs = runs[:-1]
     segments: list[tuple[float, float]] = []
     cur = start
     for s, e in runs:
